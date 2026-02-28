@@ -302,7 +302,7 @@ func deriveSessionName(rig, role, name string) string {
 		// Fallback: construct from components
 		rigPrefix := session.PrefixFor(rig)
 		if rig == "" {
-			return session.HQPrefix + role
+			return session.HQPrefix() + role
 		}
 		if name == "" {
 			return rigPrefix + "-" + role

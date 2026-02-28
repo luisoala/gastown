@@ -107,9 +107,10 @@ func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*Ag
 		registry = NewPrefixRegistry()
 	}
 
-	// Check for town-level roles (hq- prefix)
-	if strings.HasPrefix(session, HQPrefix) {
-		suffix := strings.TrimPrefix(session, HQPrefix)
+	// Check for town-level roles (town-namespaced hq- prefix)
+	hqp := HQPrefix()
+	if strings.HasPrefix(session, hqp) {
+		suffix := strings.TrimPrefix(session, hqp)
 		switch suffix {
 		case "mayor":
 			return &AgentIdentity{Role: RoleMayor}, nil

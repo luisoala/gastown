@@ -112,6 +112,8 @@ func SetDefaultRegistry(r *PrefixRegistry) {
 
 // InitRegistry populates the default registry from the town's rigs.json and
 // loads the agent registry from settings/agents.json.
+// Also initializes the town-namespaced HQ prefix from town.json to prevent
+// tmux session name collisions when multiple towns share a host.
 // Both registries are loaded independently — a failure in one does not
 // prevent the other from loading.
 // Should be called early in the process lifecycle.
@@ -119,11 +121,17 @@ func SetDefaultRegistry(r *PrefixRegistry) {
 func InitRegistry(townRoot string) error {
 	var errs []error
 
+	// Initialize town-namespaced HQ prefix from town.json.
+	// This must happen before any session name functions are called.
+	// Non-fatal: if town.json is missing or has no name, we keep the
+	// default "hq-" prefix for backward compatibility.
+	_ = initHQPrefixFromTown(townRoot)
+
 	// Use the default tmux socket so all sessions are visible via prefix+s
-	// from any terminal. Multi-town isolation (which would need per-town
-	// sockets) already requires containers/VMs due to singleton mayor/deacon
-	// session names, so a dedicated socket provides no real benefit while
-	// causing cross-socket bugs and split session visibility.
+	// from any terminal. Multi-town isolation uses town-namespaced session
+	// names (e.g., "gt-hq-mayor", "paper-town-hq-mayor") so a dedicated
+	// socket provides no real benefit while causing cross-socket bugs and
+	// split session visibility.
 	tmux.SetDefaultSocket("default")
 
 	r, err := BuildPrefixRegistryFromTown(townRoot)
@@ -241,9 +249,15 @@ func (r *PrefixRegistry) HasPrefix(sess string) bool {
 }
 
 // IsKnownSession returns true if the session name belongs to Gas Town.
-// Checks for HQ prefix and registered rig prefixes from the default registry.
+// Checks for the town-namespaced HQ prefix, legacy "hq-" prefix (for
+// backward compatibility during migration), and registered rig prefixes.
 func IsKnownSession(sess string) bool {
-	if strings.HasPrefix(sess, HQPrefix) {
+	if strings.HasPrefix(sess, HQPrefix()) {
+		return true
+	}
+	// Legacy: recognize old "hq-" sessions during migration from
+	// non-namespaced to namespaced session names.
+	if strings.HasPrefix(sess, "hq-") {
 		return true
 	}
 	return DefaultRegistry().HasPrefix(sess)
@@ -280,4 +294,19 @@ func (r *PrefixRegistry) sortedPrefixes() []string {
 		return len(prefixes[i]) > len(prefixes[j])
 	})
 	return prefixes
+}
+
+// initHQPrefixFromTown reads the town name from town.json and initializes
+// the HQ prefix for town-namespaced session names.
+func initHQPrefixFromTown(townRoot string) error {
+	townConfigPath := filepath.Join(townRoot, "mayor", "town.json")
+	tc, err := config.LoadTownConfig(townConfigPath)
+	if err != nil {
+		return fmt.Errorf("loading town.json: %w", err)
+	}
+	if tc.Name == "" {
+		return fmt.Errorf("town.json has no name field")
+	}
+	InitHQPrefixFromTownName(tc.Name)
+	return nil
 }

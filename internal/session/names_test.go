@@ -4,8 +4,12 @@ import (
 	"testing"
 )
 
-func TestMayorSessionName(t *testing.T) {
-	// Mayor session name is now fixed (one per machine), uses HQ prefix
+func TestMayorSessionName_Default(t *testing.T) {
+	// With default HQ prefix, session name uses "hq-" prefix
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+	SetHQPrefix("hq-")
+
 	want := "hq-mayor"
 	got := MayorSessionName()
 	if got != want {
@@ -13,8 +17,23 @@ func TestMayorSessionName(t *testing.T) {
 	}
 }
 
-func TestDeaconSessionName(t *testing.T) {
-	// Deacon session name is now fixed (one per machine), uses HQ prefix
+func TestMayorSessionName_TownNamespaced(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+
+	InitHQPrefixFromTownName("paper-town")
+	want := "paper-town-hq-mayor"
+	got := MayorSessionName()
+	if got != want {
+		t.Errorf("MayorSessionName() = %q, want %q", got, want)
+	}
+}
+
+func TestDeaconSessionName_Default(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+	SetHQPrefix("hq-")
+
 	want := "hq-deacon"
 	got := DeaconSessionName()
 	if got != want {
@@ -22,11 +41,65 @@ func TestDeaconSessionName(t *testing.T) {
 	}
 }
 
+func TestDeaconSessionName_TownNamespaced(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+
+	InitHQPrefixFromTownName("gt")
+	want := "gt-hq-deacon"
+	got := DeaconSessionName()
+	if got != want {
+		t.Errorf("DeaconSessionName() = %q, want %q", got, want)
+	}
+}
+
 func TestOverseerSessionName(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+	SetHQPrefix("hq-")
+
 	want := "hq-overseer"
 	got := OverseerSessionName()
 	if got != want {
 		t.Errorf("OverseerSessionName() = %q, want %q", got, want)
+	}
+}
+
+func TestBootSessionName_TownNamespaced(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+
+	InitHQPrefixFromTownName("fun-town")
+	want := "fun-town-hq-boot"
+	got := BootSessionName()
+	if got != want {
+		t.Errorf("BootSessionName() = %q, want %q", got, want)
+	}
+}
+
+func TestInitHQPrefixFromTownName(t *testing.T) {
+	oldPrefix := HQPrefix()
+	defer SetHQPrefix(oldPrefix)
+
+	tests := []struct {
+		townName   string
+		wantPrefix string
+	}{
+		{"gt", "gt-hq-"},
+		{"paper-town", "paper-town-hq-"},
+		{"br-town", "br-town-hq-"},
+		{"My Town!", "my-town-hq-"},
+		{"", "default-hq-"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.townName, func(t *testing.T) {
+			InitHQPrefixFromTownName(tt.townName)
+			got := HQPrefix()
+			if got != tt.wantPrefix {
+				t.Errorf("InitHQPrefixFromTownName(%q) => HQPrefix() = %q, want %q",
+					tt.townName, got, tt.wantPrefix)
+			}
+		})
 	}
 }
 

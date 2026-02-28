@@ -3,24 +3,53 @@ package session
 
 import (
 	"fmt"
+	"sync"
 )
 
 // DefaultPrefix is the default beads prefix used when no rig-specific prefix is known.
 const DefaultPrefix = "gt"
 
-// HQPrefix is the prefix for town-level services (Mayor, Deacon).
-const HQPrefix = "hq-"
+// hqPrefix is the prefix for town-level services (Mayor, Deacon).
+// Initialized by InitHQPrefix during registry setup; defaults to "hq-"
+// for backward compatibility with single-town deployments.
+var hqPrefix = "hq-"
+var hqPrefixMu sync.RWMutex
+
+// HQPrefix returns the current HQ prefix for town-level session names.
+// Thread-safe for concurrent access.
+func HQPrefix() string {
+	hqPrefixMu.RLock()
+	defer hqPrefixMu.RUnlock()
+	return hqPrefix
+}
+
+// SetHQPrefix sets the HQ prefix for town-level session names.
+// Called during InitRegistry with the town name from town.json.
+// Format: "<town-name>-hq-" (e.g., "gt-hq-", "paper-town-hq-").
+func SetHQPrefix(prefix string) {
+	hqPrefixMu.Lock()
+	defer hqPrefixMu.Unlock()
+	hqPrefix = prefix
+}
+
+// InitHQPrefixFromTownName derives and sets the HQ prefix from the town name.
+// The prefix format is "<sanitized-town-name>-hq-" to namespace town-level
+// sessions per town, preventing collisions when multiple towns share a host.
+func InitHQPrefixFromTownName(townName string) {
+	sanitized := sanitizeTownName(townName)
+	SetHQPrefix(sanitized + "-hq-")
+}
 
 // MayorSessionName returns the session name for the Mayor agent.
-// One mayor per machine - multi-town requires containers/VMs for isolation.
+// Session name is namespaced by town (e.g., "gt-hq-mayor", "paper-town-hq-mayor").
 func MayorSessionName() string {
-	return HQPrefix + "mayor"
+	return HQPrefix() + "mayor"
 }
 
 // DeaconSessionName returns the session name for the Deacon agent.
-// One deacon per machine - multi-town requires containers/VMs for isolation.
+// Session name is namespaced by town (e.g., "gt-hq-deacon", "paper-town-hq-deacon").
 func DeaconSessionName() string {
-	return HQPrefix + "deacon"
+	return HQPrefix() + "deacon"
 }
 
 // WitnessSessionName returns the session name for a rig's Witness agent.
@@ -50,12 +79,11 @@ func PolecatSessionName(rigPrefix, name string) string {
 // OverseerSessionName returns the session name for the human operator.
 // The overseer is the human who controls Gas Town, not an AI agent.
 func OverseerSessionName() string {
-	return HQPrefix + "overseer"
+	return HQPrefix() + "overseer"
 }
 
 // BootSessionName returns the session name for the Boot watchdog.
-// Boot is town-level (launched by deacon), so it uses the hq- prefix.
-// "hq-boot" avoids tmux prefix-matching collisions with "hq-deacon".
+// Boot is town-level (launched by deacon), so it uses the town-namespaced hq- prefix.
 func BootSessionName() string {
-	return HQPrefix + "boot"
+	return HQPrefix() + "boot"
 }
