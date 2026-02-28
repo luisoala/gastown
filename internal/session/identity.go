@@ -102,10 +102,14 @@ func ParseSessionName(session string) (*AgentIdentity, error) {
 
 // ParseSessionNameWithRegistry parses a tmux session name using a specific registry.
 // If registry is nil, an empty registry is used (prefix will not resolve to rig name).
+// Strips town prefix before parsing (e.g., "gt-hq-mayor" → "hq-mayor").
 func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*AgentIdentity, error) {
 	if registry == nil {
 		registry = NewPrefixRegistry()
 	}
+
+	// Strip town prefix if present (e.g., "gt-hq-mayor" → "hq-mayor").
+	session = StripTownPrefix(session)
 
 	// Check for town-level roles (hq- prefix)
 	if strings.HasPrefix(session, HQPrefix) {

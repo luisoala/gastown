@@ -2042,16 +2042,49 @@ func EnsureMetadata(townRoot, rigName string) error {
 	return nil
 }
 
+// loadRegisteredRigSet reads mayor/rigs.json and returns a set of rig names
+// registered in this town. Returns nil (not error) if the file is missing or
+// unparseable — callers treat nil as "no filtering".
+func loadRegisteredRigSet(townRoot string) map[string]bool {
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	data, err := os.ReadFile(rigsPath) //nolint:gosec // G304: trusted config path
+	if err != nil {
+		return nil
+	}
+	var parsed struct {
+		Rigs map[string]interface{} `json:"rigs"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(parsed.Rigs))
+	for name := range parsed.Rigs {
+		set[name] = true
+	}
+	return set
+}
+
 // EnsureAllMetadata updates metadata.json for all rig databases known to the
 // Dolt server. This is the fix for the split-brain problem where worktrees
 // each have their own isolated database.
+//
+// When rigs.json exists, only databases registered in this town (plus "hq")
+// are processed. This prevents phantom .beads/ directories from appearing
+// when multiple towns share the same Dolt server.
 func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	databases, err := ListDatabases(townRoot)
 	if err != nil {
 		return nil, []error{fmt.Errorf("listing databases: %w", err)}
 	}
 
+	knownRigs := loadRegisteredRigSet(townRoot)
+
 	for _, dbName := range databases {
+		// If we have a rigs.json, skip databases not registered in this town.
+		// "hq" is always included (every town has its own HQ database).
+		if knownRigs != nil && dbName != "hq" && !knownRigs[dbName] {
+			continue
+		}
 		if err := EnsureMetadata(townRoot, dbName); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", dbName, err))
 		} else {

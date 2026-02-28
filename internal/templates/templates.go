@@ -65,6 +65,7 @@ type RoleData struct {
 	IssuePrefix    string   // beads issue prefix
 	MayorSession   string   // e.g., "gt-ai-mayor" - dynamic mayor session name
 	DeaconSession  string   // e.g., "gt-ai-deacon" - dynamic deacon session name
+	RefPool        string   // GT_REF_POOL path (empty if not configured)
 }
 
 // SpawnData contains information for spawn assignment messages.
