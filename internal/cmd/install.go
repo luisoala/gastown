@@ -321,6 +321,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   ✓ Created mayor/daemon.json\n")
 	}
 
+	// Auto-assign Dolt port if the default (3307) is already in use.
+	// This prevents cross-town contamination when multiple towns share a host.
+	if !installNoBeads {
+		if err := ensureDoltPort(absPath); err != nil {
+			fmt.Printf("   %s Could not auto-assign Dolt port: %v\n", style.Dim.Render("⚠"), err)
+		}
+	}
+
 	// Initialize git BEFORE beads so that bd can compute repository fingerprint.
 	// The fingerprint is required for the daemon to start properly.
 	if installGit || installGitHub != "" {
@@ -732,6 +740,81 @@ func initTownAgentBeads(townPath string) error {
 		}
 		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)
 	}
+
+	return nil
+}
+
+// ensureDoltPort checks if the default Dolt port (3307) is available.
+// If it's already in use (e.g., by another Gas Town instance), finds the next
+// free port and writes it into daemon.json's env section as GT_DOLT_PORT.
+// Also sets the env var in the current process so subsequent doltserver.Start()
+// picks it up.
+func ensureDoltPort(townRoot string) error {
+	defaultPort := doltserver.DefaultPort
+
+	// If GT_DOLT_PORT is already set in the environment, respect it.
+	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			return fmt.Errorf("invalid GT_DOLT_PORT %q: %w", p, err)
+		}
+		fmt.Printf("   • Using GT_DOLT_PORT=%d from environment\n", port)
+		return nil
+	}
+
+	// Check if default port is free.
+	if err := doltserver.CheckPortAvailable(defaultPort); err == nil {
+		// Default port is available — no action needed.
+		return nil
+	}
+
+	// Default port is taken. Find the next free one.
+	freePort := doltserver.FindFreePort(defaultPort + 1)
+	if freePort == 0 {
+		return fmt.Errorf("no free port found in range %d-%d", defaultPort+1, defaultPort+100)
+	}
+
+	fmt.Printf("   • Port %d in use, auto-assigned Dolt port %d\n", defaultPort, freePort)
+
+	// Patch daemon.json to include GT_DOLT_PORT in the env section.
+	daemonPath := config.DaemonPatrolConfigPath(townRoot)
+	data, err := os.ReadFile(daemonPath) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		return fmt.Errorf("reading daemon.json: %w", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing daemon.json: %w", err)
+	}
+
+	// Parse existing env or create new.
+	envMap := make(map[string]string)
+	if rawEnv, ok := raw["env"]; ok {
+		if err := json.Unmarshal(rawEnv, &envMap); err != nil {
+			return fmt.Errorf("parsing daemon.json env: %w", err)
+		}
+	}
+
+	envMap["GT_DOLT_PORT"] = strconv.Itoa(freePort)
+
+	envBytes, err := json.Marshal(envMap)
+	if err != nil {
+		return fmt.Errorf("marshaling env: %w", err)
+	}
+	raw["env"] = envBytes
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling daemon.json: %w", err)
+	}
+
+	if err := os.WriteFile(daemonPath, out, 0644); err != nil {
+		return fmt.Errorf("writing daemon.json: %w", err)
+	}
+
+	// Set in current process so doltserver.Start() uses the right port.
+	os.Setenv("GT_DOLT_PORT", strconv.Itoa(freePort))
 
 	return nil
 }
