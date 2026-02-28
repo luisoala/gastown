@@ -30,6 +30,8 @@ This document captures the target execution model going forward.
 | JSONL Backup | Imperative Go (619 lines) | Yes | Export, scrub, filter, spike detect, push |
 | Dolt Backup | Imperative Go | Yes | Filesystem backup sync |
 | Compactor | Imperative Go (new) | Yes | Flatten + GC when commits > threshold |
+| Quota Rotation | Imperative Go | Yes | Scan + rotate credentials on rate limit |
+| Scheduled Maint | Imperative Go | Yes | Window-based `gt maintain --force` |
 
 ## Target Model
 
@@ -42,6 +44,8 @@ Dogs that MUST run on schedule, unattended, with no agent dependency:
 - **Compactor**: Compaction must run deterministically on its 24h schedule.
 - **JSONL Backup**: Backup integrity can't be left to agent scheduling.
 - **Dolt Backup**: Same as JSONL.
+- **Quota Rotation**: Credential swap must happen promptly when rate-limited (opt-in).
+- **Scheduled Maintenance**: Must check the window deterministically.
 
 **Principle**: If the dog's failure would cause a Clown Show, it must be imperative Go.
 
