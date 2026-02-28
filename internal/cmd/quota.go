@@ -41,7 +41,11 @@ var quotaCmd = &cobra.Command{
 	Long: `Manage Claude Code account quota rotation for Gas Town.
 
 When sessions hit rate limits, quota commands help detect blocked sessions
-and rotate them to available accounts from the pool.
+and rotate them to available accounts from the pool. Works on both macOS
+(Keychain) and Linux (.credentials.json).
+
+Automated rotation is available via the quota_rotation_dog daemon patrol.
+Enable in mayor/daemon.json: {"quota_rotation_dog": {"enabled": true}}
 
 Commands:
   gt quota status            Show account quota status
@@ -371,9 +375,12 @@ it's not disruptive.
 The rotation process:
   1. Scans all Gas Town sessions for rate-limit indicators
   2. Selects available accounts (LRU order)
-  3. Swaps macOS Keychain credentials (same config dir preserved)
+  3. Swaps credentials (macOS Keychain or Linux .credentials.json)
   4. Restarts blocked sessions via respawn-pane
   5. Sends /resume to recover conversation context
+
+Can also run automatically via the quota_rotation_dog daemon patrol.
+Enable in mayor/daemon.json: {"quota_rotation_dog": {"enabled": true, "interval": "3m"}}
 
 Examples:
   gt quota rotate                    # Rotate all blocked sessions
