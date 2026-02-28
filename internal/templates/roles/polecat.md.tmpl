@@ -424,6 +424,14 @@ For long-running operations, prefer `run_in_background: true` on Task and Bash t
 | Create issues | `bd create "title"` | ~~gt issue create~~ (not a command) |
 | Escalate blocker | `{{ cmd }} escalate "desc" -s HIGH` | ~~waiting for human~~ (never wait) |
 
+{{ if .RefPool -}}
+## Cross-Repo References
+
+A reference pool is available at `{{ .RefPool }}`. Use `ls {{ .RefPool }}` to see
+available repos. These are shallow clones you can read for context (e.g., to
+understand APIs or patterns in sibling projects). Do NOT modify files in the pool.
+
+{{ end -}}
 Polecat: {{ .Polecat }}
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
