@@ -4,6 +4,7 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2825,7 +2826,11 @@ var safePrefixRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,19}$`)
 // "hq" is always included because it lives outside the rig registry
 // (town-level services).
 //
-// Example output: "^(bd|db|fa|gl|gt|hq|la|lc)-"
+// When a town name is set (multi-town mode), the pattern includes an optional
+// town-name prefix so both "gt-hq-mayor" and "hq-mayor" are recognized.
+//
+// Example output (single town): "^(bd|db|fa|gl|gt|hq|la|lc)-"
+// Example output (multi-town):  "^([a-z0-9-]+-)?(bd|db|fa|gl|gt|hq|la|lc)-"
 func sessionPrefixPattern() string {
 	seen := map[string]bool{"hq": true, "gt": true} // always include HQ + gastown fallback
 	townRoot := os.Getenv("GT_ROOT")
@@ -2841,7 +2846,40 @@ func sessionPrefixPattern() string {
 		sorted = append(sorted, p)
 	}
 	sort.Strings(sorted)
-	return "^(" + strings.Join(sorted, "|") + ")-"
+	rigAlts := strings.Join(sorted, "|")
+
+	// Check if we're in multi-town mode by looking for town name.
+	// If set, allow an optional town-name prefix before the rig prefix.
+	townName := os.Getenv("GT_TOWN_NAME")
+	if townName == "" {
+		// Try loading from town.json
+		if townRoot != "" {
+			townName = loadTownNameFromConfig(townRoot)
+		}
+	}
+	if townName != "" {
+		// Match optional town prefix: "^(townName-)?(rigAlts)-"
+		return "^(" + regexp.QuoteMeta(townName) + "-)?(" + rigAlts + ")-"
+	}
+	return "^(" + rigAlts + ")-"
+}
+
+// loadTownNameFromConfig reads the town name from mayor/town.json.
+// Returns empty string on any error.
+func loadTownNameFromConfig(townRoot string) string {
+	data, err := os.ReadFile(filepath.Join(townRoot, "mayor", "town.json")) //nolint:gosec // G304
+	if err != nil {
+		return ""
+	}
+	// Minimal JSON parse — avoid importing session package (circular).
+	type tc struct {
+		Name string `json:"name"`
+	}
+	var cfg tc
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	return cfg.Name
 }
 
 // SetCycleBindings sets up C-b n/p to cycle through related sessions.

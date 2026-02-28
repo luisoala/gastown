@@ -96,6 +96,42 @@ var (
 	defaultRegistryMu sync.RWMutex
 )
 
+// townName is the name of this Gas Town instance, used to prefix tmux session
+// names for multi-town isolation. Protected by townNameMu.
+var (
+	townName   string
+	townNameMu sync.RWMutex
+)
+
+// GetTownName returns the current town name (empty if not set).
+func GetTownName() string {
+	townNameMu.RLock()
+	defer townNameMu.RUnlock()
+	return townName
+}
+
+// SetTownName sets the town name used for session name prefixing.
+func SetTownName(name string) {
+	townNameMu.Lock()
+	townName = name
+	townNameMu.Unlock()
+}
+
+// StripTownPrefix removes the "{townName}-" prefix from a session name if
+// the current town name is set and the session starts with it.
+// Returns the original string if no town prefix is present.
+func StripTownPrefix(session string) string {
+	tn := GetTownName()
+	if tn == "" {
+		return session
+	}
+	prefix := tn + "-"
+	if strings.HasPrefix(session, prefix) {
+		return session[len(prefix):]
+	}
+	return session
+}
+
 // DefaultRegistry returns the package-level prefix registry.
 func DefaultRegistry() *PrefixRegistry {
 	defaultRegistryMu.RLock()
@@ -133,6 +169,18 @@ func InitRegistry(townRoot string) error {
 		socket = sanitizeTownName(filepath.Base(townRoot))
 	}
 	tmux.SetDefaultSocket(socket)
+
+	// Load town name for session prefixing. town.json is authoritative.
+	townConfigPath := filepath.Join(townRoot, "mayor", "town.json")
+	data, readErr := os.ReadFile(townConfigPath) //nolint:gosec // G304: trusted config path
+	if readErr == nil {
+		var tc struct {
+			Name string `json:"name"`
+		}
+		if jsonErr := json.Unmarshal(data, &tc); jsonErr == nil && tc.Name != "" {
+			SetTownName(sanitizeTownName(tc.Name))
+		}
+	}
 
 	r, err := BuildPrefixRegistryFromTown(townRoot)
 	if err != nil {
@@ -224,7 +272,9 @@ var LegacyPrefixes = []string{"gt", "bd", "hq", "gthq"}
 // HasKnownPrefix returns true if s starts with a registered or legacy prefix
 // followed by "-". Use this instead of hand-rolling prefix checks so that
 // all call-sites agree on what constitutes a valid prefix.
+// Strips town prefix before checking (e.g., "gt-hq-mayor" → "hq-mayor").
 func HasKnownPrefix(s string) bool {
+	s = StripTownPrefix(s)
 	if DefaultRegistry().HasPrefix(s) {
 		return true
 	}
@@ -250,7 +300,9 @@ func (r *PrefixRegistry) HasPrefix(sess string) bool {
 
 // IsKnownSession returns true if the session name belongs to Gas Town.
 // Checks for HQ prefix and registered rig prefixes from the default registry.
+// Strips town prefix before checking (e.g., "gt-hq-mayor" → "hq-mayor").
 func IsKnownSession(sess string) bool {
+	sess = StripTownPrefix(sess)
 	if strings.HasPrefix(sess, HQPrefix) {
 		return true
 	}
