@@ -462,6 +462,18 @@ func (d *Daemon) Run() error {
 		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
 	}
 
+	// Start quota rotation dog ticker if configured.
+	// Scans quota status and rotates credentials when rate-limited.
+	var quotaRotationDogTicker *time.Ticker
+	var quotaRotationDogChan <-chan time.Time
+	if IsPatrolEnabled(d.patrolConfig, "quota_rotation_dog") {
+		interval := quotaRotationDogInterval(d.patrolConfig)
+		quotaRotationDogTicker = time.NewTicker(interval)
+		quotaRotationDogChan = quotaRotationDogTicker.C
+		defer quotaRotationDogTicker.Stop()
+		d.logger.Printf("Quota rotation dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -547,6 +559,13 @@ func (d *Daemon) Run() error {
 			// and runs `gt maintain --force` when commit counts exceed threshold.
 			if !d.isShutdownInProgress() {
 				d.runScheduledMaintenance()
+			}
+
+		case <-quotaRotationDogChan:
+			// Quota rotation dog — scans quota status and rotates credentials
+			// when the active account hits rate limits.
+			if !d.isShutdownInProgress() {
+				d.runQuotaRotationDog()
 			}
 
 		case <-timer.C:

@@ -128,6 +128,7 @@ type PatrolsConfig struct {
 	CompactorDog           *CompactorDogConfig            `json:"compactor_dog,omitempty"`
 	ScheduledMaintenance   *ScheduledMaintenanceConfig    `json:"scheduled_maintenance,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
+	QuotaRotationDog       *QuotaRotationDogConfig        `json:"quota_rotation_dog,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -286,6 +287,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
+	}
+	if patrol == "quota_rotation_dog" {
+		if config == nil || config.Patrols == nil || config.Patrols.QuotaRotationDog == nil {
+			return false
+		}
+		return config.Patrols.QuotaRotationDog.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

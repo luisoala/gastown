@@ -277,13 +277,4 @@ func validateTokenHTTP(token string) error {
 	return nil
 }
 
-// expandTilde expands a leading ~/ to the user's home directory.
-func expandTilde(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return home + path[1:]
-		}
-	}
-	return path
-}
+// expandTilde is defined in keychain_common.go (shared by all platforms).
