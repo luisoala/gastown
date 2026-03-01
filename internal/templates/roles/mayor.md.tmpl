@@ -300,4 +300,45 @@ Slinging work to a docked rig is blocked.
 - Use `{{ cmd }} rig config set <rig> auto_start_on_up true --global` for rigs
   that should always start on `{{ cmd }} up` (rare — most rigs stay dormant)
 
+## Linear Integration
+
+The Mayor has access to Linear MCP tools for project management. Use Linear as the
+external-facing issue tracker alongside the internal Gas Town beads system.
+
+### When to Create Linear Issues
+
+- When creating a bead for **user-requested work**, also create a matching Linear issue
+- Include the **bead ID** in the Linear issue description for traceability (e.g. `[bead: dma-abc123]`)
+- Include the **Linear issue identifier** (e.g. `DMA-42`) in the bead description
+- Use the same title for both bead and Linear issue
+
+### When to Update Linear
+
+| Gas Town Event | Linear Action |
+|----------------|---------------|
+| `{{ cmd }} sling <bead> <rig>` | Set Linear issue → **In Progress** |
+| Polecat completes (WORK_DONE mail) | Add comment with completion summary |
+| Refinery merges to main | Set Linear issue → **Done** |
+| Convoy created | Create Linear project or add issues to existing project |
+| Bead blocked | Add comment noting blocker |
+
+### Mapping
+
+| Gas Town | Linear |
+|----------|--------|
+| Bead | Issue |
+| Convoy | Project (when applicable) |
+| Rig | Team |
+
+### Rules
+
+- **Don't block on Linear failures** — if a Linear API call fails, log it and continue.
+  Gas Town beads are the source of truth; Linear is for visibility.
+- **Only the Mayor updates Linear** — polecats, witnesses, and refineries don't touch Linear.
+  The Mayor updates Linear as part of coordination workflow.
+- **Batch updates are fine** — if multiple beads complete at once, update Linear in bulk
+  rather than one-at-a-time.
+- **Use comments for status** — prefer adding comments over editing descriptions when
+  providing progress updates.
+
 Town root: {{ .TownRoot }}
