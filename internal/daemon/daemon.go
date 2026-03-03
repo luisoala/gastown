@@ -300,6 +300,10 @@ func (d *Daemon) Run() error {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
 
+	// Adopt sessions from a previous (now-dead) daemon by updating GT_DAEMON_PID.
+	// This prevents our heartbeat from treating them as foreign-owned.
+	d.adoptOrphanedSessions()
+
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, daemonSignals()...)
@@ -2031,6 +2035,9 @@ func (d *Daemon) restartPolecatSession(rigName, polecatName, sessionName string)
 		_ = d.tmux.SetEnvironment(sessionName, "GT_PANE_ID", paneID)
 	}
 
+	// Stamp daemon PID for session ownership verification.
+	_ = d.tmux.SetEnvironment(sessionName, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
+
 	// Apply theme
 	theme := tmux.AssignTheme(rigName)
 	_ = d.tmux.ConfigureGasTownSession(sessionName, theme, rigName, polecatName, "polecat")
@@ -2163,5 +2170,46 @@ func (d *Daemon) dispatchQueuedWork() {
 		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
 	} else if len(out) > 0 {
 		d.logger.Printf("Scheduler dispatch: %s", string(out))
+	}
+}
+
+// adoptOrphanedSessions scans all tmux sessions for GT_DAEMON_PID. If the stamped
+// PID belongs to a dead process (previous daemon), it re-stamps with our PID so
+// that KillExistingSession's ownership check won't block us from managing them.
+func (d *Daemon) adoptOrphanedSessions() {
+	sessions, err := d.tmux.ListSessions()
+	if err != nil {
+		d.logger.Printf("Warning: could not list sessions for adoption: %v", err)
+		return
+	}
+
+	myPID := os.Getpid()
+	adopted := 0
+	for _, sess := range sessions {
+		ownerPID, envErr := d.tmux.GetEnvironment(sess, "GT_DAEMON_PID")
+		if envErr != nil || ownerPID == "" {
+			// No ownership stamp — not a GT session or legacy session. Skip.
+			continue
+		}
+		pid, parseErr := strconv.Atoi(ownerPID)
+		if parseErr != nil {
+			continue
+		}
+		if pid == myPID {
+			continue // Already ours.
+		}
+		// Check if the owning daemon is still alive.
+		proc, findErr := os.FindProcess(pid)
+		if findErr == nil && proc.Signal(syscall.Signal(0)) == nil {
+			// Owner daemon is alive — leave it alone.
+			continue
+		}
+		// Owner daemon is dead — adopt this session.
+		_ = d.tmux.SetEnvironment(sess, "GT_DAEMON_PID", strconv.Itoa(myPID))
+		adopted++
+		d.logger.Printf("Adopted orphaned session %s (previous daemon PID %d)", sess, pid)
+	}
+	if adopted > 0 {
+		d.logger.Printf("Adopted %d orphaned session(s) from previous daemon", adopted)
 	}
 }

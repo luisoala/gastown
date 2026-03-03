@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -283,6 +285,10 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		_ = t.SetEnvironment(cfg.SessionID, "GT_PANE_ID", paneID)
 	}
 
+	// 13b. Stamp daemon PID for session ownership verification.
+	// Prevents a stale daemon's heartbeat from killing sessions created by a newer daemon.
+	_ = t.SetEnvironment(cfg.SessionID, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
+
 	// 14. Track PID for defense-in-depth orphan cleanup.
 	if cfg.TrackPID && cfg.TownRoot != "" {
 		_ = TrackSessionPID(cfg.TownRoot, cfg.SessionID, t)
@@ -437,11 +443,33 @@ func KillExistingSession(t *tmux.Tmux, sessionID string, checkAlive bool) (bool,
 		return false, fmt.Errorf("session already running: %s", sessionID)
 	}
 
+	// Check daemon ownership before killing. If the session was created by a
+	// different daemon that is still alive, refuse to kill it. This prevents a
+	// stale daemon's heartbeat from destroying sessions owned by a newer daemon.
+	if ownerPID, envErr := t.GetEnvironment(sessionID, "GT_DAEMON_PID"); envErr == nil && ownerPID != "" {
+		pid, parseErr := strconv.Atoi(ownerPID)
+		if parseErr == nil && pid != os.Getpid() {
+			if isProcessAliveByPID(pid) {
+				return false, fmt.Errorf("session %s owned by daemon PID %d (still alive), refusing to kill", sessionID, pid)
+			}
+			// Owner daemon is dead — safe to reclaim and kill.
+		}
+	}
+
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
 		return false, fmt.Errorf("killing session %s: %w", sessionID, err)
 	}
 
 	return true, nil
+}
+
+// isProcessAliveByPID checks if a process with the given PID is still running.
+func isProcessAliveByPID(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // buildPrompt creates the startup prompt from beacon + instructions.

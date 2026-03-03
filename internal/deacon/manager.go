@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -149,6 +150,9 @@ func (m *Manager) Start(agentOverride string) error {
 	if paneID, err := t.GetPaneID(sessionID); err == nil {
 		_ = t.SetEnvironment(sessionID, "GT_PANE_ID", paneID)
 	}
+
+	// Stamp daemon PID for session ownership verification.
+	_ = t.SetEnvironment(sessionID, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
 
 	// Apply Deacon theming (non-fatal: theming failure doesn't affect operation)
 	theme := tmux.DeaconTheme()

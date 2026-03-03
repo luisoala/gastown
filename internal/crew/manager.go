@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -834,6 +835,9 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	if paneID, err := t.GetPaneID(sessionID); err == nil {
 		_ = t.SetEnvironment(sessionID, "GT_PANE_ID", paneID)
 	}
+
+	// Stamp daemon PID for session ownership verification.
+	_ = t.SetEnvironment(sessionID, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
 
 	// Apply rig-based theming (non-fatal: theming failure doesn't affect operation)
 	theme := tmux.AssignTheme(m.rig.Name)

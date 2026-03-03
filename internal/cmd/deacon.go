@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -552,6 +553,9 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 	if paneID, err := t.GetPaneID(sessionName); err == nil {
 		_ = t.SetEnvironment(sessionName, "GT_PANE_ID", paneID)
 	}
+
+	// Stamp daemon PID for session ownership verification.
+	_ = t.SetEnvironment(sessionName, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
 
 	// Apply Deacon theme (non-fatal: theming failure doesn't affect operation)
 	// Note: ConfigureGasTownSession includes cycle bindings

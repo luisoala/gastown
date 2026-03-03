@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -380,6 +381,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if paneID, err := m.tmux.GetPaneID(sessionID); err == nil {
 		debugSession("SetEnvironment GT_PANE_ID", m.tmux.SetEnvironment(sessionID, "GT_PANE_ID", paneID))
 	}
+
+	// Stamp daemon PID for session ownership verification.
+	_ = m.tmux.SetEnvironment(sessionID, "GT_DAEMON_PID", strconv.Itoa(os.Getpid()))
 
 	// Hook the issue to the polecat if provided via --issue flag
 	if opts.Issue != "" {
