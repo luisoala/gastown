@@ -105,6 +105,13 @@ func attachToTmuxSession(sessionID string) error {
 		args = append(baseArgs, "attach-session", "-t", sessionID)
 	}
 
+	// Reset file descriptors to blocking mode before exec.
+	// Go's runtime sets them to non-blocking for its internal poller,
+	// which causes tmux 3.6+ to fail with "open terminal failed: not a terminal".
+	for _, fd := range []int{0, 1, 2} {
+		syscall.SetNonblock(fd, false)
+	}
+
 	// Replace the Go process with tmux for direct terminal control
 	return syscall.Exec(tmuxPath, args, os.Environ())
 }
@@ -133,6 +140,11 @@ func execAgent(cfg *config.RuntimeConfig, prompt string) error {
 		return fmt.Errorf("%s not found: %w", cfg.Command, err)
 	}
 
+	// Reset file descriptors to blocking mode before exec (Go sets non-blocking).
+	for _, fd := range []int{0, 1, 2} {
+		syscall.SetNonblock(fd, false)
+	}
+
 	// exec replaces current process with agent
 	// args[0] must be the command name (convention for exec)
 	args := append([]string{cfg.Command}, cfg.Args...)
@@ -156,6 +168,11 @@ func execRuntime(prompt, rigPath, configDir string) error {
 	binPath, err := exec.LookPath(args[0])
 	if err != nil {
 		return fmt.Errorf("runtime command not found: %w", err)
+	}
+
+	// Reset file descriptors to blocking mode before exec (Go sets non-blocking).
+	for _, fd := range []int{0, 1, 2} {
+		syscall.SetNonblock(fd, false)
 	}
 
 	env := os.Environ()
