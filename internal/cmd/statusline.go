@@ -20,6 +20,34 @@ var (
 	statusLineSession string
 )
 
+// tmuxIcons maps agent types to ASCII markers for tmux status bar.
+// tmux <=3.3 miscounts emoji display widths, causing status bar wrapping.
+var tmuxIcons = map[AgentType]string{
+	AgentWitness:  "W",
+	AgentRefinery: "R",
+	AgentDeacon:   "D",
+	AgentCrew:     "C",
+	AgentPolecat:  "P",
+}
+
+// tmuxRigLED returns an ASCII rig state indicator for tmux status bar.
+func tmuxRigLED(hasWitness, hasRefinery bool, opState string) string {
+	if hasWitness && hasRefinery {
+		return "+"
+	}
+	if hasWitness || hasRefinery {
+		return "~"
+	}
+	switch opState {
+	case "PARKED":
+		return "P"
+	case "DOCKED":
+		return "X"
+	default:
+		return "-"
+	}
+}
+
 var statusLineCmd = &cobra.Command{
 	Use:   "status-line",
 	Short: "Output status line content for tmux (internal use)",
@@ -92,10 +120,10 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 	// Determine agent type and identity
 	var icon, identity string
 	if polecat != "" {
-		icon = AgentTypeIcons[AgentPolecat]
+		icon = tmuxIcons[AgentPolecat]
 		identity = fmt.Sprintf("%s/%s", rigName, polecat)
 	} else if crew != "" {
-		icon = AgentTypeIcons[AgentCrew]
+		icon = tmuxIcons[AgentCrew]
 		identity = fmt.Sprintf("%s/crew/%s", rigName, crew)
 	}
 
@@ -127,9 +155,9 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 	// Show hooked work (takes precedence)
 	if hookedWork != "" {
 		if icon != "" {
-			parts = append(parts, fmt.Sprintf("%s 🪝 %s", icon, hookedWork))
+			parts = append(parts, fmt.Sprintf("%s hook:%s", icon, hookedWork))
 		} else {
-			parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
+			parts = append(parts, fmt.Sprintf("hook:%s", hookedWork))
 		}
 	} else if currentWork != "" {
 		// Fall back to current work (in_progress)
@@ -147,9 +175,9 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 		unread, subject := getMailPreviewWithRoot(identity, 45, townRoot)
 		if unread > 0 {
 			if subject != "" {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %s", subject))
+				parts = append(parts, fmt.Sprintf("mail:%s", subject))
 			} else {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
+				parts = append(parts, fmt.Sprintf("mail:%d", unread))
 			}
 		}
 	}
@@ -275,8 +303,8 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		if health.total == 0 {
 			continue
 		}
-		icon := AgentTypeIcons[agentType]
-		agentParts = append(agentParts, fmt.Sprintf("%d/%d %s", health.working, health.total, icon))
+		icon := tmuxIcons[agentType]
+		agentParts = append(agentParts, fmt.Sprintf("%d/%d%s", health.working, health.total, icon))
 	}
 	if len(agentParts) > 0 {
 		parts = append(parts, strings.Join(agentParts, " "))
@@ -284,7 +312,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Add deacon icon if running (just presence, no count)
 	if hasDeacon {
-		parts = append(parts, AgentTypeIcons[AgentDeacon])
+		parts = append(parts, tmuxIcons[AgentDeacon])
 	}
 
 	// Build rig status display with LED indicators (see GetRigLED for definitions)
@@ -340,13 +368,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		lastGroup = currentGroup
 
 		status := rig.status
-		led := GetRigLED(status.hasWitness, status.hasRefinery, status.opState)
-
-		// All icons get 1 space, Park gets 2
-		space := " "
-		if led == "🅿️" {
-			space = "  "
-		}
+		led := tmuxRigLED(status.hasWitness, status.hasRefinery, status.opState)
 		// Abbreviate rig names to beads prefix when >2 rigs
 		displayName := rig.name
 		if len(rigs) > 2 && townRoot != "" {
@@ -354,7 +376,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 				displayName = prefix
 			}
 		}
-		rigParts = append(rigParts, led+space+displayName)
+		rigParts = append(rigParts, led+" "+displayName)
 	}
 
 	if len(rigParts) > 0 {
@@ -367,15 +389,15 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		hookedWork = getHookedWork("mayor", 40, townRoot)
 	}
 	if hookedWork != "" {
-		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
+		parts = append(parts, fmt.Sprintf("hook:%s", hookedWork))
 	} else if townRoot != "" {
 		// Priority 2: Fall back to mail preview
 		unread, subject := getMailPreviewWithRoot("mayor/", 45, townRoot)
 		if unread > 0 {
 			if subject != "" {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %s", subject))
+				parts = append(parts, fmt.Sprintf("mail:%s", subject))
 			} else {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
+				parts = append(parts, fmt.Sprintf("mail:%d", unread))
 			}
 		}
 	}
@@ -436,15 +458,15 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 		hookedWork = getHookedWork("deacon", 35, townRoot)
 	}
 	if hookedWork != "" {
-		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
+		parts = append(parts, fmt.Sprintf("hook:%s", hookedWork))
 	} else if townRoot != "" {
 		// Priority 2: Fall back to mail preview
 		unread, subject := getMailPreviewWithRoot("deacon/", 40, townRoot)
 		if unread > 0 {
 			if subject != "" {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %s", subject))
+				parts = append(parts, fmt.Sprintf("mail:%s", subject))
 			} else {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
+				parts = append(parts, fmt.Sprintf("mail:%d", unread))
 			}
 		}
 	}
@@ -504,15 +526,15 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 		hookedWork = getHookedWork(identity, 30, rigBeadsDir)
 	}
 	if hookedWork != "" {
-		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
+		parts = append(parts, fmt.Sprintf("hook:%s", hookedWork))
 	} else if townRoot != "" {
 		// Priority 2: Fall back to mail preview
 		unread, subject := getMailPreviewWithRoot(identity, 35, townRoot)
 		if unread > 0 {
 			if subject != "" {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %s", subject))
+				parts = append(parts, fmt.Sprintf("mail:%s", subject))
 			} else {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
+				parts = append(parts, fmt.Sprintf("mail:%d", unread))
 			}
 		}
 	}
@@ -532,7 +554,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	}
 
 	if rigName == "" {
-		fmt.Printf("%s ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s ? |", tmuxIcons[AgentRefinery])
 		return nil
 	}
 
@@ -548,7 +570,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	mgr, _, _, err := getRefineryManager(rigName)
 	if err != nil {
 		// Fallback to simple status if we can't access refinery
-		fmt.Printf("%s MQ: ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s MQ: ? |", tmuxIcons[AgentRefinery])
 		return nil
 	}
 
@@ -556,7 +578,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	queue, err := mgr.Queue()
 	if err != nil {
 		// Fallback to simple status if we can't read queue
-		fmt.Printf("%s MQ: ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s MQ: ? |", tmuxIcons[AgentRefinery])
 		return nil
 	}
 
@@ -594,15 +616,15 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 		hookedWork = getHookedWork(identity, 25, rigBeadsDir)
 	}
 	if hookedWork != "" {
-		parts = append(parts, fmt.Sprintf("🪝 %s", hookedWork))
+		parts = append(parts, fmt.Sprintf("hook:%s", hookedWork))
 	} else if townRoot != "" {
 		// Priority 2: Fall back to mail preview
 		unread, subject := getMailPreviewWithRoot(identity, 30, townRoot)
 		if unread > 0 {
 			if subject != "" {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %s", subject))
+				parts = append(parts, fmt.Sprintf("mail:%s", subject))
 			} else {
-				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
+				parts = append(parts, fmt.Sprintf("mail:%d", unread))
 			}
 		}
 	}
