@@ -2531,7 +2531,7 @@ func (t *Tmux) SetStatusFormat(session, rig, worker, role string) error {
 		left = fmt.Sprintf("%s %s ", icon, session)
 	}
 
-	if _, err := t.run("set-option", "-t", session, "status-left-length", "25"); err != nil {
+	if _, err := t.run("set-option", "-t", session, "status-left-length", "30"); err != nil {
 		return err
 	}
 	_, err := t.run("set-option", "-t", session, "status-left", left)
@@ -2549,7 +2549,7 @@ func (t *Tmux) SetDynamicStatus(session string) error {
 	// gt status-line reads env vars and mail to build the status
 	right := fmt.Sprintf(`#(gt status-line --session=%s 2>/dev/null) %%H:%%M`, session)
 
-	if _, err := t.run("set-option", "-t", session, "status-right-length", "80"); err != nil {
+	if _, err := t.run("set-option", "-t", session, "status-right-length", "120"); err != nil {
 		return err
 	}
 	// Set faster refresh for more responsive status
