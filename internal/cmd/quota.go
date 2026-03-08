@@ -70,13 +70,15 @@ Examples:
 
 // QuotaStatusItem represents an account in status output.
 type QuotaStatusItem struct {
-	Handle    string `json:"handle"`
-	Email     string `json:"email"`
-	Status    string `json:"status"`
-	LimitedAt string `json:"limited_at,omitempty"`
-	ResetsAt  string `json:"resets_at,omitempty"`
-	LastUsed  string `json:"last_used,omitempty"`
-	IsDefault bool   `json:"is_default"`
+	Handle       string `json:"handle"`
+	Email        string `json:"email"`
+	Status       string `json:"status"`
+	LimitedAt    string `json:"limited_at,omitempty"`
+	ResetsAt     string `json:"resets_at,omitempty"`
+	LastUsed     string `json:"last_used,omitempty"`
+	IsDefault    bool   `json:"is_default"`
+	TokenValid   bool   `json:"token_valid"`
+	TokenExpires string `json:"token_expires,omitempty"`
 }
 
 func runQuotaStatus(cmd *cobra.Command, args []string) error {
@@ -132,7 +134,7 @@ func printQuotaStatusJSON(acctCfg *config.AccountsConfig, state *config.QuotaSta
 		if status == "" {
 			status = string(config.QuotaStatusAvailable)
 		}
-		items = append(items, QuotaStatusItem{
+		item := QuotaStatusItem{
 			Handle:    handle,
 			Email:     acct.Email,
 			Status:    status,
@@ -140,7 +142,13 @@ func printQuotaStatusJSON(acctCfg *config.AccountsConfig, state *config.QuotaSta
 			ResetsAt:  qs.ResetsAt,
 			LastUsed:  qs.LastUsed,
 			IsDefault: handle == acctCfg.Default,
-		})
+		}
+		tokenInfo := quota.GetTokenInfo(acct.ConfigDir)
+		item.TokenValid = tokenInfo.Valid
+		if tokenInfo.HasToken && !tokenInfo.ExpiresAt.IsZero() {
+			item.TokenExpires = tokenInfo.ExpiresAt.Format(time.RFC3339)
+		}
+		items = append(items, item)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -150,6 +158,7 @@ func printQuotaStatusJSON(acctCfg *config.AccountsConfig, state *config.QuotaSta
 func printQuotaStatusText(acctCfg *config.AccountsConfig, state *config.QuotaState) error {
 	available := 0
 	limited := 0
+	expired := 0
 
 	fmt.Println(style.Bold.Render("Account Quota Status"))
 	fmt.Println()
@@ -168,19 +177,34 @@ func printQuotaStatusText(acctCfg *config.AccountsConfig, state *config.QuotaSta
 			marker = "*"
 		}
 
+		// Check token validity
+		tokenInfo := quota.GetTokenInfo(acct.ConfigDir)
+
 		// Status badge
 		var badge string
-		switch status {
-		case config.QuotaStatusAvailable:
+		switch {
+		case tokenInfo.HasToken && !tokenInfo.Valid:
+			// Token expired overrides quota status
+			badge = style.Error.Render("expired")
+			expired++
+			if !tokenInfo.ExpiresAt.IsZero() {
+				ago := time.Since(tokenInfo.ExpiresAt)
+				badge += style.Dim.Render(fmt.Sprintf(" (%.0fh ago)", ago.Hours()))
+			}
+		case status == config.QuotaStatusAvailable:
 			badge = style.Success.Render("available")
 			available++
-		case config.QuotaStatusLimited:
+			if tokenInfo.HasToken && !tokenInfo.ExpiresAt.IsZero() {
+				remaining := time.Until(tokenInfo.ExpiresAt)
+				badge += style.Dim.Render(fmt.Sprintf(" (%.1fh left)", remaining.Hours()))
+			}
+		case status == config.QuotaStatusLimited:
 			badge = style.Error.Render("limited")
 			limited++
 			if qs.ResetsAt != "" {
 				badge += style.Dim.Render(" (resets " + qs.ResetsAt + ")")
 			}
-		case config.QuotaStatusCooldown:
+		case status == config.QuotaStatusCooldown:
 			badge = style.Warning.Render("cooldown")
 			limited++
 		default:
@@ -196,8 +220,19 @@ func printQuotaStatusText(acctCfg *config.AccountsConfig, state *config.QuotaSta
 	}
 
 	fmt.Println()
-	fmt.Printf(" %s %d available, %d limited\n",
-		style.Info.Render("Summary:"), available, limited)
+	parts := []string{fmt.Sprintf("%d available", available)}
+	if limited > 0 {
+		parts = append(parts, fmt.Sprintf("%d limited", limited))
+	}
+	if expired > 0 {
+		parts = append(parts, fmt.Sprintf("%d expired", expired))
+	}
+	fmt.Printf(" %s %s\n", style.Info.Render("Summary:"), strings.Join(parts, ", "))
+
+	if expired > 0 {
+		fmt.Printf("\n %s Refresh expired tokens: gt account login <handle>\n",
+			style.Warning.Render("Tip:"))
+	}
 
 	return nil
 }

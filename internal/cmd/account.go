@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/quota"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -34,6 +38,8 @@ easy account selection per spawn or globally.
 Commands:
   gt account list              List registered accounts
   gt account add <handle>      Add a new account
+  gt account login <handle>    Refresh an account's OAuth token
+  gt account rename <old> <new> Rename an account handle
   gt account default <handle>  Set the default account
   gt account status            Show current account info`,
 }
@@ -503,6 +509,206 @@ func ensureSharedCommandsSymlink(configDir string) error {
 	return os.Symlink(realCmds, acctCmds)
 }
 
+var accountLoginCmd = &cobra.Command{
+	Use:   "login <handle>",
+	Short: "Refresh an account's OAuth token",
+	Long: `Refresh the OAuth token for a specific account.
+
+Launches Claude Code with the account's config directory to perform /login,
+then verifies the token was updated. This does NOT affect running sessions
+or the active account symlink.
+
+After login, use 'gt quota rotate --to <handle>' to push the fresh token
+to sessions that need it.
+
+Examples:
+  gt account login lat           # Refresh lat account token
+  gt account login l@ba          # Refresh l@ba account token`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAccountLogin,
+}
+
+func runAccountLogin(cmd *cobra.Command, args []string) error {
+	handle := args[0]
+
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	cfg, err := config.LoadAccountsConfig(accountsPath)
+	if err != nil {
+		return fmt.Errorf("loading accounts config: %w", err)
+	}
+
+	acct := cfg.GetAccount(handle)
+	if acct == nil {
+		var handles []string
+		for h := range cfg.Accounts {
+			handles = append(handles, h)
+		}
+		sort.Strings(handles)
+		return fmt.Errorf("account '%s' not found. Available accounts: %v", handle, handles)
+	}
+
+	configDir := acct.ConfigDir
+	expandedDir := configDir
+	if strings.HasPrefix(expandedDir, "~/") {
+		home, _ := os.UserHomeDir()
+		expandedDir = home + expandedDir[1:]
+	}
+
+	// Check current token status
+	tokenInfo := quota.GetTokenInfo(configDir)
+	if tokenInfo.HasToken && tokenInfo.Valid {
+		remaining := time.Until(tokenInfo.ExpiresAt)
+		fmt.Printf("Current token for '%s' is valid (%.1f hours remaining)\n", handle, remaining.Hours())
+		fmt.Println()
+	}
+
+	// Launch claude with the account's config dir for interactive login
+	fmt.Printf("Launching Claude Code for account '%s'...\n", handle)
+	fmt.Printf("Config dir: %s\n", configDir)
+	fmt.Println()
+	fmt.Println(style.Warning.Render("Run /login inside the Claude session, then /exit when done."))
+	fmt.Println()
+
+	claudeCmd := exec.Command("claude")
+	claudeCmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+expandedDir)
+	claudeCmd.Stdin = os.Stdin
+	claudeCmd.Stdout = os.Stdout
+	claudeCmd.Stderr = os.Stderr
+
+	if err := claudeCmd.Run(); err != nil {
+		return fmt.Errorf("claude session failed: %w", err)
+	}
+
+	// Verify token was refreshed
+	newTokenInfo := quota.GetTokenInfo(configDir)
+	if !newTokenInfo.HasToken {
+		fmt.Println()
+		style.PrintWarning("No token found after login. Did you run /login?")
+		return nil
+	}
+
+	if newTokenInfo.Valid {
+		remaining := time.Until(newTokenInfo.ExpiresAt)
+		fmt.Println()
+		fmt.Printf("%s Token for '%s' refreshed (%.1f hours remaining)\n",
+			style.SuccessPrefix, handle, remaining.Hours())
+	} else {
+		fmt.Println()
+		style.PrintWarning("Token for '%s' appears expired. Try again with /login.", handle)
+	}
+
+	return nil
+}
+
+var accountRenameCmd = &cobra.Command{
+	Use:   "rename <old-handle> <new-handle>",
+	Short: "Rename an account handle",
+	Long: `Rename an account handle and its config directory.
+
+Updates the accounts registry, renames the config directory, and fixes
+the ~/.claude symlink if the renamed account is currently active.
+
+Examples:
+  gt account rename br-1 lat
+  gt account rename work personal`,
+	Args: cobra.ExactArgs(2),
+	RunE: runAccountRename,
+}
+
+func runAccountRename(cmd *cobra.Command, args []string) error {
+	oldHandle := args[0]
+	newHandle := args[1]
+
+	if oldHandle == newHandle {
+		return fmt.Errorf("old and new handles are the same")
+	}
+
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	cfg, err := config.LoadAccountsConfig(accountsPath)
+	if err != nil {
+		return fmt.Errorf("loading accounts config: %w", err)
+	}
+
+	// Check old handle exists
+	oldAcct, exists := cfg.Accounts[oldHandle]
+	if !exists {
+		return fmt.Errorf("account '%s' not found", oldHandle)
+	}
+
+	// Check new handle doesn't exist
+	if _, exists := cfg.Accounts[newHandle]; exists {
+		return fmt.Errorf("account '%s' already exists", newHandle)
+	}
+
+	// Determine new config dir path
+	baseDir, err := config.DefaultAccountsConfigDir()
+	if err != nil {
+		return fmt.Errorf("determining accounts config directory: %w", err)
+	}
+	oldDir := filepath.Join(baseDir, oldHandle)
+	newDir := filepath.Join(baseDir, newHandle)
+
+	// Check if we need to update the symlink
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("getting home directory: %w", err)
+	}
+	claudeDir := home + "/.claude"
+	needSymlinkUpdate := false
+
+	if info, err := os.Lstat(claudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(claudeDir)
+		if err == nil && (target == oldDir || target == oldAcct.ConfigDir) {
+			needSymlinkUpdate = true
+		}
+	}
+
+	// Rename the directory (only if it matches the expected path)
+	if oldAcct.ConfigDir == oldDir || oldAcct.ConfigDir == "~/"+".claude-accounts/"+oldHandle {
+		if _, err := os.Stat(oldDir); err == nil {
+			if err := os.Rename(oldDir, newDir); err != nil {
+				return fmt.Errorf("renaming directory %s to %s: %w", oldDir, newDir, err)
+			}
+			fmt.Printf("Renamed directory: %s → %s\n", oldDir, newDir)
+		}
+	}
+
+	// Update symlink if needed
+	if needSymlinkUpdate {
+		os.Remove(claudeDir)
+		if err := os.Symlink(newDir, claudeDir); err != nil {
+			return fmt.Errorf("creating symlink: %w", err)
+		}
+		fmt.Printf("Updated symlink: ~/.claude → %s\n", newDir)
+	}
+
+	// Update accounts config
+	delete(cfg.Accounts, oldHandle)
+	oldAcct.ConfigDir = newDir
+	cfg.Accounts[newHandle] = oldAcct
+
+	if cfg.Default == oldHandle {
+		cfg.Default = newHandle
+	}
+
+	if err := config.SaveAccountsConfig(accountsPath, cfg); err != nil {
+		return fmt.Errorf("saving accounts config: %w", err)
+	}
+
+	fmt.Printf("Renamed account '%s' → '%s'\n", oldHandle, newHandle)
+	return nil
+}
+
 func init() {
 	// Add flags
 	accountListCmd.Flags().BoolVar(&accountJSON, "json", false, "Output as JSON")
@@ -516,6 +722,8 @@ func init() {
 	accountCmd.AddCommand(accountDefaultCmd)
 	accountCmd.AddCommand(accountStatusCmd)
 	accountCmd.AddCommand(accountSwitchCmd)
+	accountCmd.AddCommand(accountLoginCmd)
+	accountCmd.AddCommand(accountRenameCmd)
 
 	rootCmd.AddCommand(accountCmd)
 }
