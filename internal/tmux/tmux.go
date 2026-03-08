@@ -113,7 +113,7 @@ func BuildCommand(args ...string) *exec.Cmd {
 	return BuildCommandContext(context.Background(), args...)
 }
 
-// BuildCommandContext is like BuildCommand but honours a context for cancellation.
+// BuildCommandContext is like BuildCommand but honors a context for cancellation.
 func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	allArgs := []string{"-u"}
 	if sock := GetDefaultSocket(); sock != "" {
@@ -2364,6 +2364,13 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 	promptPrefix := DefaultReadyPromptPrefix
 	prefix := strings.TrimSpace(promptPrefix)
 
+	// Require 2 consecutive idle polls to filter out transient states.
+	// During inter-tool-call gaps (~500ms), the prompt may briefly appear
+	// in the pane buffer while Claude Code is still actively working.
+	// Two polls 200ms apart (400ms window) confirms genuine idle state.
+	consecutiveIdle := 0
+	const requiredConsecutive = 2
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		lines, err := t.CapturePaneLines(session, 5)
@@ -2374,20 +2381,52 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 				return err
 			}
+			consecutiveIdle = 0
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+
+		// Check the status bar first: if "esc to interrupt" is visible,
+		// Claude Code is actively running a tool call — NOT idle,
+		// regardless of whether the prompt prefix is also visible.
+		statusBarBusy := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(trimmed, "\u23F5\u23F5") || strings.Contains(trimmed, "⏵⏵") {
+				if strings.Contains(trimmed, "esc to interrupt") {
+					statusBarBusy = true
+				}
+				break
+			}
+		}
+		if statusBarBusy {
+			consecutiveIdle = 0
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
 		// Scan all captured lines for the prompt prefix.
 		// Claude Code renders a status bar below the prompt line,
 		// so the prompt may not be the last non-empty line.
+		promptFound := false
 		for _, line := range lines {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" {
 				continue
 			}
 			if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
+				promptFound = true
+				break
+			}
+		}
+
+		if promptFound {
+			consecutiveIdle++
+			if consecutiveIdle >= requiredConsecutive {
 				return nil
 			}
+		} else {
+			consecutiveIdle = 0
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -2746,6 +2785,17 @@ func (t *Tmux) isGTBindingWithClient(table, key string) bool {
 		strings.Contains(output, "--client")
 }
 
+// isGTBindingCurrent checks whether the existing GT cycle binding has the
+// current prefix pattern. Returns false if the binding is stale (e.g., after
+// gt rig add introduces a new prefix not yet in the grep pattern).
+func (t *Tmux) isGTBindingCurrent(table, key, currentPattern string) bool {
+	output, err := t.run("list-keys", "-T", table, key)
+	if err != nil || output == "" {
+		return false
+	}
+	return strings.Contains(output, currentPattern)
+}
+
 // getKeyBinding returns the current tmux command bound to the given key in the
 // specified key table. Returns empty string if no binding exists or if querying
 // fails. This is used to capture user bindings before overwriting them, so the
@@ -2901,13 +2951,16 @@ func loadTownNameFromConfig(townRoot string) string {
 // reliably preserve the session context. tmux expands #{session_name} at binding
 // resolution time (when the key is pressed), giving us the correct session.
 func (t *Tmux) SetCycleBindings(session string) error {
-	// Skip if already correctly configured (has --client for multi-client support).
-	// We must re-bind if an older GT binding exists without --client, since that
-	// version targets the wrong client when multiple tmux clients are attached.
-	if t.isGTBindingWithClient("prefix", "n") {
+	// Skip if already correctly configured:
+	// 1. Has --client for multi-client support
+	// 2. Has the current prefix pattern (not stale from before a gt rig add)
+	// We must re-bind if an older GT binding exists without --client, or if the
+	// prefix pattern is stale (missing newly added rig prefixes).
+	// See: https://github.com/steveyegge/gastown/issues/2299
+	pattern := sessionPrefixPattern()
+	if t.isGTBindingWithClient("prefix", "n") && t.isGTBindingCurrent("prefix", "n", pattern) {
 		return nil
 	}
-	pattern := sessionPrefixPattern()
 	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", pattern)
 
 	// Capture existing bindings before overwriting, falling back to tmux defaults

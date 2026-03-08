@@ -97,12 +97,32 @@ func attachToTmuxSession(sessionID string) error {
 	}
 
 	var args []string
-	if isInSameTmuxSocket() {
+	inSameSocket := isInSameTmuxSocket()
+	if inSameSocket {
 		// Same tmux socket: switch to the target session
 		args = append(baseArgs, "switch-client", "-t", sessionID)
 	} else {
 		// Outside tmux or different socket: attach to the session
 		args = append(baseArgs, "attach-session", "-t", sessionID)
+	}
+
+	// Debug: show what we're about to exec (remove after fixing tmux 3.6 issue)
+	if os.Getenv("GT_DEBUG_ATTACH") != "" {
+		fmt.Fprintf(os.Stderr, "DEBUG attach: inSameSocket=%v socket=%q session=%q\n",
+			inSameSocket, tmux.GetDefaultSocket(), sessionID)
+		fmt.Fprintf(os.Stderr, "DEBUG attach: stdin_fd=%d stdout_fd=%d stderr_fd=%d\n",
+			os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd())
+		fmt.Fprintf(os.Stderr, "DEBUG attach: TMUX=%q TMUX_PANE=%q\n",
+			os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
+		fmt.Fprintf(os.Stderr, "DEBUG attach: exec args=%v\n", args)
+		fmt.Fprintf(os.Stderr, "DEBUG attach: tmuxPath=%s\n", tmuxPath)
+		// Check /proc/self/fd/0 to see what stdin actually points to
+		if link, err := os.Readlink("/proc/self/fd/0"); err == nil {
+			fmt.Fprintf(os.Stderr, "DEBUG attach: /proc/self/fd/0 -> %s\n", link)
+		}
+		if link, err := os.Readlink("/proc/self/fd/1"); err == nil {
+			fmt.Fprintf(os.Stderr, "DEBUG attach: /proc/self/fd/1 -> %s\n", link)
+		}
 	}
 
 	// Reset file descriptors to blocking mode before exec.
