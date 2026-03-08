@@ -9,8 +9,9 @@ import (
 )
 
 // TestInitRegistry_SocketFromTownName verifies GT_TMUX_SOCKET socket selection:
-//   - unset / "default" / "auto" → per-town socket derived from town directory name
-//   - explicit value              → that value verbatim
+//   - unset / "default"          → shared "default" socket
+//   - "auto"                     → per-town socket derived from town directory name
+//   - explicit value             → that value verbatim
 func TestInitRegistry_SocketFromTownName(t *testing.T) {
 	origTMUX := os.Getenv("TMUX")
 	origSocket := tmux.GetDefaultSocket()
@@ -29,16 +30,16 @@ func TestInitRegistry_SocketFromTownName(t *testing.T) {
 		wantSocket  string  // expected tmux socket name
 	}{
 		{
-			name:        "unset → derived from town name",
+			name:        "unset → shared default socket",
 			gtTmuxSocket: "",
 			townDir:     "gt",
-			wantSocket:  "gt",
+			wantSocket:  "default",
 		},
 		{
-			name:        "explicit default → derived from town name",
+			name:        "explicit default → shared default socket",
 			gtTmuxSocket: "default",
 			townDir:     "gt",
-			wantSocket:  "gt",
+			wantSocket:  "default",
 		},
 		{
 			name:        "auto → town name",
