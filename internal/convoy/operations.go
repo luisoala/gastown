@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -421,6 +422,7 @@ func fetchCrossRigBeadStatus(townRoot string, ids []string) map[string]*beadsdk.
 		args := append([]string{"show", "--json"}, prefixIDs...)
 		cmd := exec.Command("bd", args...)
 		cmd.Dir = rigPath
+		cmd.Env = os.Environ()
 		out, err := cmd.Output()
 		if err != nil {
 			continue

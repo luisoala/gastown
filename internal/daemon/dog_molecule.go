@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -275,6 +276,7 @@ func (dm *dogMol) runBd(args ...string) (string, error) {
 
 	cmd := exec.CommandContext(ctx, bdPath, args...)
 	cmd.Dir = dm.townRoot
+	cmd.Env = os.Environ()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

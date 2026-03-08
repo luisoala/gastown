@@ -165,6 +165,20 @@ func New(config *Config) (*Daemon, error) {
 			os.Setenv(k, v)
 			logger.Printf("Set env %s=%s from daemon.json", k, v)
 		}
+		// Translate GT_DOLT_PORT → BEADS_DOLT_PORT so that both the beads SDK
+		// (used in-process by convoy manager stores) and bd subprocesses connect
+		// to the correct Dolt server. Without this, towns using non-default ports
+		// (e.g., 3309) fall back to port 3307 and trigger circuit-breaker storms.
+		if gtPort := os.Getenv("GT_DOLT_PORT"); gtPort != "" {
+			if os.Getenv("BEADS_DOLT_PORT") == "" {
+				os.Setenv("BEADS_DOLT_PORT", gtPort)
+				logger.Printf("Set env BEADS_DOLT_PORT=%s (translated from GT_DOLT_PORT)", gtPort)
+			}
+			if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" {
+				os.Setenv("BEADS_DOLT_SERVER_PORT", gtPort)
+				logger.Printf("Set env BEADS_DOLT_SERVER_PORT=%s (translated from GT_DOLT_PORT)", gtPort)
+			}
+		}
 	}
 
 	// Initialize Dolt server manager if configured
