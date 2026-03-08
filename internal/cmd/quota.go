@@ -357,6 +357,7 @@ func printScanText(results []quota.ScanResult) error {
 var (
 	rotateDryRun bool
 	rotateFrom   string
+	rotateTo     string
 	rotateIdle   bool
 )
 
@@ -372,9 +373,13 @@ Use --from to preemptively rotate sessions using a specific account before
 it hits its rate limit. This is useful for switching idle sessions while
 it's not disruptive.
 
+Use --to to force rotation to a specific target account instead of LRU
+round-robin selection. Useful when you know a specific account is available
+and want to direct blocked sessions to it.
+
 The rotation process:
   1. Scans all Gas Town sessions for rate-limit indicators
-  2. Selects available accounts (LRU order)
+  2. Selects available accounts (LRU order, or --to target)
   3. Swaps credentials (macOS Keychain or Linux .credentials.json)
   4. Restarts blocked sessions via respawn-pane
   5. Sends /resume to recover conversation context
@@ -384,6 +389,7 @@ Enable in mayor/daemon.json: {"quota_rotation_dog": {"enabled": true, "interval"
 
 Examples:
   gt quota rotate                    # Rotate all blocked sessions
+  gt quota rotate --to personal      # Rotate blocked sessions to 'personal' account
   gt quota rotate --from work        # Preemptively rotate sessions on 'work' account
   gt quota rotate --from work --idle # Only rotate idle sessions on 'work' account
   gt quota rotate --dry-run          # Show plan without executing
@@ -415,6 +421,17 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Validate --to account if specified
+	if rotateTo != "" {
+		if _, ok := acctCfg.Accounts[rotateTo]; !ok {
+			return fmt.Errorf("target account %q not found (available: %s)",
+				rotateTo, strings.Join(accountHandles(acctCfg), ", "))
+		}
+		if rotateTo == rotateFrom {
+			return fmt.Errorf("--from and --to cannot be the same account")
+		}
+	}
+
 	// Create scanner and plan rotation
 	t := ttmux.NewTmux()
 	scanner, err := quota.NewScanner(t, nil, acctCfg)
@@ -423,7 +440,7 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	}
 
 	mgr := quota.NewManager(townRoot)
-	plan, err := quota.PlanRotation(scanner, mgr, acctCfg, quota.PlanOpts{FromAccount: rotateFrom})
+	plan, err := quota.PlanRotation(scanner, mgr, acctCfg, quota.PlanOpts{FromAccount: rotateFrom, ToAccount: rotateTo})
 	if err != nil {
 		return fmt.Errorf("planning rotation: %w", err)
 	}
@@ -951,6 +968,7 @@ func init() {
 	quotaRotateCmd.Flags().BoolVar(&rotateDryRun, "dry-run", false, "Show plan without executing")
 	quotaRotateCmd.Flags().BoolVar(&quotaJSON, "json", false, "Output as JSON")
 	quotaRotateCmd.Flags().StringVar(&rotateFrom, "from", "", "Preemptively rotate sessions using this account")
+	quotaRotateCmd.Flags().StringVar(&rotateTo, "to", "", "Force rotation to this specific target account")
 	quotaRotateCmd.Flags().BoolVar(&rotateIdle, "idle", false, "Only rotate sessions at the idle prompt (skip busy agents)")
 
 	quotaWatchCmd.Flags().DurationVar(&watchInterval, "interval", 5*time.Minute, "Poll interval")

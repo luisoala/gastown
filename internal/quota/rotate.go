@@ -49,6 +49,11 @@ type PlanOpts struct {
 	// rate-limit status (preemptive rotation). Empty string = default behavior.
 	FromAccount string
 
+	// ToAccount forces all assignments to use this specific account instead
+	// of LRU round-robin selection. Useful when a specific session is blocked
+	// and you want to rotate it to a known-good account.
+	ToAccount string
+
 	// IncludeNearLimit includes sessions approaching their rate limit
 	// (not just hard-limited sessions) as rotation candidates.
 	IncludeNearLimit bool
@@ -117,20 +122,34 @@ func PlanRotation(scanner *Scanner, mgr *Manager, acctCfg *config.AccountsConfig
 	// keychain entry, which would leave the session non-functional.
 	skipped := make(map[string]string)
 	var validAvailable []string
-	for _, handle := range available {
-		if handle == opts.FromAccount {
-			continue // rotating away from this account, not a candidate
-		}
-		acct, ok := acctCfg.Accounts[handle]
+	if opts.ToAccount != "" {
+		// --to mode: only use the specified target account
+		acct, ok := acctCfg.Accounts[opts.ToAccount]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("target account %q not found", opts.ToAccount)
 		}
 		configDir := util.ExpandHome(acct.ConfigDir)
 		if err := ValidateKeychainToken(configDir); err != nil {
-			skipped[handle] = err.Error()
-			continue
+			skipped[opts.ToAccount] = err.Error()
+		} else {
+			validAvailable = append(validAvailable, opts.ToAccount)
 		}
-		validAvailable = append(validAvailable, handle)
+	} else {
+		for _, handle := range available {
+			if handle == opts.FromAccount {
+				continue // rotating away from this account, not a candidate
+			}
+			acct, ok := acctCfg.Accounts[handle]
+			if !ok {
+				continue
+			}
+			configDir := util.ExpandHome(acct.ConfigDir)
+			if err := ValidateKeychainToken(configDir); err != nil {
+				skipped[handle] = err.Error()
+				continue
+			}
+			validAvailable = append(validAvailable, handle)
+		}
 	}
 	available = validAvailable
 
