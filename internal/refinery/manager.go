@@ -106,8 +106,9 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 // If foreground is true, returns an error (foreground mode deprecated).
 // Otherwise, spawns a Claude agent in a tmux session to process the merge queue.
 // The agentOverride parameter allows specifying an agent alias to use instead of the town default.
+// envOverrides are KEY=VALUE pairs applied after all other env var sources (highest priority).
 // ZFC-compliant: no state file, tmux session is source of truth.
-func (m *Manager) Start(foreground bool, agentOverride string) error {
+func (m *Manager) Start(foreground bool, agentOverride string, envOverrides ...string) error {
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -163,13 +164,22 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")
 
+	// Extract RuntimeConfigDir from envOverrides if present
+	var runtimeConfigDir string
+	for _, override := range envOverrides {
+		if key, value, ok := strings.Cut(override, "="); ok && key == "CLAUDE_CONFIG_DIR" {
+			runtimeConfigDir = value
+		}
+	}
+
 	command, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
-		Role:        "refinery",
-		Rig:         m.rig.Name,
-		TownRoot:    townRoot,
-		Prompt:      initialPrompt,
-		Topic:       "patrol",
-		SessionName: sessionID,
+		Role:             "refinery",
+		Rig:              m.rig.Name,
+		TownRoot:         townRoot,
+		Prompt:           initialPrompt,
+		Topic:            "patrol",
+		SessionName:      sessionID,
+		RuntimeConfigDir: runtimeConfigDir,
 	}, m.rig.Path, initialPrompt, agentOverride)
 	if err != nil {
 		return fmt.Errorf("building startup command: %w", err)
@@ -203,6 +213,12 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		_ = t.SetEnvironment(sessionID, k, v)
 	}
 	_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
+	// Apply CLI env overrides (highest priority, non-fatal).
+	for _, override := range envOverrides {
+		if key, value, ok := strings.Cut(override, "="); ok {
+			_ = t.SetEnvironment(sessionID, key, value)
+		}
+	}
 
 	// Apply theme (non-fatal: theming failure doesn't affect operation)
 	theme := tmux.AssignTheme(m.rig.Name)

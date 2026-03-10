@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -318,6 +319,7 @@ var (
 	rigRestartNuclear  bool
 	rigListJSON        bool
 	rigRemoveForce     bool
+	rigStartAccount    string
 )
 
 var (
@@ -350,6 +352,8 @@ func init() {
 	rigCmd.AddCommand(rigStartCmd)
 	rigCmd.AddCommand(rigStatusCmd)
 	rigCmd.AddCommand(rigStopCmd)
+
+	rigStartCmd.Flags().StringVar(&rigStartAccount, "account", "", "Account handle for witness/refinery (default: resolved from config)")
 
 	rigListCmd.Flags().BoolVar(&rigListJSON, "json", false, "Output as JSON")
 
@@ -1417,6 +1421,13 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	// Resolve account for witness/refinery sessions (same logic as crew)
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	claudeConfigDir, resolvedHandle, _ := config.ResolveAccountConfigDir(accountsPath, rigStartAccount)
+	if resolvedHandle != "" {
+		fmt.Printf("Account: %s\n", resolvedHandle)
+	}
+
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsPath)
@@ -1452,6 +1463,12 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 		var skipped []string
 		hasError := false
 
+		// Build env overrides for account resolution
+		var envOverrides []string
+		if claudeConfigDir != "" {
+			envOverrides = append(envOverrides, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
+		}
+
 		// 1. Start the witness
 		witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
 		witnessRunning, _ := t.HasSession(witnessSession)
@@ -1460,7 +1477,7 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("  Starting witness...\n")
 			witMgr := witness.NewManager(r)
-			if err := witMgr.Start(false, "", nil); err != nil {
+			if err := witMgr.Start(false, "", envOverrides); err != nil {
 				if err == witness.ErrAlreadyRunning {
 					skipped = append(skipped, "witness")
 				} else {
@@ -1480,7 +1497,7 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("  Starting refinery...\n")
 			refMgr := refinery.NewManager(r)
-			if err := refMgr.Start(false, ""); err != nil {
+			if err := refMgr.Start(false, "", envOverrides...); err != nil {
 				fmt.Printf("  %s Failed to start refinery: %v\n", style.Warning.Render("⚠"), err)
 				hasError = true
 			} else {

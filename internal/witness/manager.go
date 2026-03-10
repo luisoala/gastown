@@ -179,7 +179,15 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// NOTE: No gt prime injection needed - SessionStart hook handles it automatically
 	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
 	// Pass m.rig.Path so rig agent settings are honored (not town-level defaults)
-	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, sessionID, agentOverride, roleConfig)
+	// Extract RuntimeConfigDir from envOverrides if present
+	var runtimeConfigDir string
+	for _, override := range envOverrides {
+		if key, value, ok := strings.Cut(override, "="); ok && key == "CLAUDE_CONFIG_DIR" {
+			runtimeConfigDir = value
+		}
+	}
+
+	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, sessionID, agentOverride, roleConfig, runtimeConfigDir)
 	if err != nil {
 		return err
 	}
@@ -289,7 +297,7 @@ func roleConfigEnvVars(roleConfig *beads.RoleConfig, townRoot, rigName string) m
 	return expanded
 }
 
-func buildWitnessStartCommand(rigPath, rigName, townRoot, sessionName, agentOverride string, roleConfig *beads.RoleConfig) (string, error) {
+func buildWitnessStartCommand(rigPath, rigName, townRoot, sessionName, agentOverride string, roleConfig *beads.RoleConfig, runtimeConfigDir string) (string, error) {
 	if agentOverride != "" {
 		roleConfig = nil
 	}
@@ -302,12 +310,13 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, sessionName, agentOver
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")
 	command, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
-		Role:        "witness",
-		Rig:         rigName,
-		TownRoot:    townRoot,
-		Prompt:      initialPrompt,
-		Topic:       "patrol",
-		SessionName: sessionName,
+		Role:             "witness",
+		Rig:              rigName,
+		TownRoot:         townRoot,
+		Prompt:           initialPrompt,
+		Topic:            "patrol",
+		SessionName:      sessionName,
+		RuntimeConfigDir: runtimeConfigDir,
 	}, rigPath, initialPrompt, agentOverride)
 	if err != nil {
 		return "", fmt.Errorf("building startup command: %w", err)

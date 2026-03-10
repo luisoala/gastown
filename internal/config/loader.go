@@ -775,45 +775,122 @@ func (c *AccountsConfig) GetDefaultAccount() *Account {
 // Priority order:
 //  1. GT_ACCOUNT environment variable
 //  2. accountFlag (from --account command flag)
-//  3. Default account from config
+//  3. Default account from per-town config (accountsPath)
+//
+// Account handles are looked up from the global registry first (~/.claude-accounts/accounts.json),
+// falling back to the per-town accounts file. This allows accounts to be registered once globally
+// and shared across all towns, while each town can set its own default.
 //
 // Returns empty string if no account configured or resolved.
 // Returns the handle that was resolved as second value.
 func ResolveAccountConfigDir(accountsPath, accountFlag string) (configDir, handle string, err error) {
-	// Load accounts config
-	cfg, loadErr := LoadAccountsConfig(accountsPath)
-	if loadErr != nil {
-		// No accounts configured - that's OK, return empty
-		return "", "", nil
+	// Load global accounts config (shared across all towns)
+	globalPath := constants.GlobalAccountsPath()
+	globalCfg, _ := LoadAccountsConfig(globalPath)
+
+	// Load per-town accounts config (for default selection and legacy accounts)
+	townCfg, _ := LoadAccountsConfig(accountsPath)
+
+	// lookupAccount searches global first, then town config
+	lookupAccount := func(h string) *Account {
+		if globalCfg != nil {
+			if acct := globalCfg.GetAccount(h); acct != nil {
+				return acct
+			}
+		}
+		if townCfg != nil {
+			if acct := townCfg.GetAccount(h); acct != nil {
+				return acct
+			}
+		}
+		return nil
 	}
 
 	// Priority 1: GT_ACCOUNT env var
 	if envAccount := os.Getenv("GT_ACCOUNT"); envAccount != "" {
-		acct := cfg.GetAccount(envAccount)
+		acct := lookupAccount(envAccount)
 		if acct == nil {
-			return "", "", fmt.Errorf("GT_ACCOUNT '%s' not found in accounts config", envAccount)
+			return "", "", fmt.Errorf("GT_ACCOUNT '%s' not found in accounts config (checked global and town)", envAccount)
 		}
 		return expandPath(acct.ConfigDir), envAccount, nil
 	}
 
 	// Priority 2: --account flag
 	if accountFlag != "" {
-		acct := cfg.GetAccount(accountFlag)
+		acct := lookupAccount(accountFlag)
 		if acct == nil {
-			return "", "", fmt.Errorf("account '%s' not found in accounts config", accountFlag)
+			return "", "", fmt.Errorf("account '%s' not found in accounts config (checked global and town)", accountFlag)
 		}
 		return expandPath(acct.ConfigDir), accountFlag, nil
 	}
 
-	// Priority 3: Default account
-	if cfg.Default != "" {
-		acct := cfg.GetDefaultAccount()
+	// Priority 3: Default account from per-town config
+	if townCfg != nil && townCfg.Default != "" {
+		acct := lookupAccount(townCfg.Default)
 		if acct != nil {
-			return expandPath(acct.ConfigDir), cfg.Default, nil
+			return expandPath(acct.ConfigDir), townCfg.Default, nil
+		}
+	}
+
+	// Priority 4: Default account from global config
+	if globalCfg != nil && globalCfg.Default != "" {
+		acct := lookupAccount(globalCfg.Default)
+		if acct != nil {
+			return expandPath(acct.ConfigDir), globalCfg.Default, nil
 		}
 	}
 
 	return "", "", nil
+}
+
+// LoadGlobalAccountsConfig loads the global accounts registry from ~/.claude-accounts/accounts.json.
+// Returns nil, nil if no global config exists.
+func LoadGlobalAccountsConfig() (*AccountsConfig, error) {
+	globalPath := constants.GlobalAccountsPath()
+	if globalPath == "" {
+		return nil, fmt.Errorf("cannot determine global accounts path")
+	}
+	return LoadAccountsConfig(globalPath)
+}
+
+// SaveGlobalAccountsConfig saves the global accounts registry to ~/.claude-accounts/accounts.json.
+func SaveGlobalAccountsConfig(config *AccountsConfig) error {
+	globalPath := constants.GlobalAccountsPath()
+	if globalPath == "" {
+		return fmt.Errorf("cannot determine global accounts path")
+	}
+	return SaveAccountsConfig(globalPath, config)
+}
+
+// MigrateAccountsToGlobal copies accounts from a per-town accounts.json to the global registry.
+// Existing global accounts with the same handle are NOT overwritten.
+// Returns the number of accounts migrated.
+func MigrateAccountsToGlobal(townAccountsPath string) (int, error) {
+	townCfg, err := LoadAccountsConfig(townAccountsPath)
+	if err != nil {
+		return 0, err
+	}
+
+	globalCfg, _ := LoadGlobalAccountsConfig()
+	if globalCfg == nil {
+		globalCfg = NewAccountsConfig()
+	}
+
+	migrated := 0
+	for handle, acct := range townCfg.Accounts {
+		if _, exists := globalCfg.Accounts[handle]; !exists {
+			globalCfg.Accounts[handle] = acct
+			migrated++
+		}
+	}
+
+	if migrated > 0 {
+		if err := SaveGlobalAccountsConfig(globalCfg); err != nil {
+			return 0, fmt.Errorf("saving global accounts: %w", err)
+		}
+	}
+
+	return migrated, nil
 }
 
 // expandPath expands ~ to home directory.

@@ -2,7 +2,10 @@
 // Centralizing these magic strings improves maintainability and consistency.
 package constants
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // Timing constants for session management and tmux operations.
 //
@@ -389,8 +392,22 @@ func RigSettingsPath(rigPath string) string {
 }
 
 // MayorAccountsPath returns the path to mayor/accounts.json within a town root.
+// DEPRECATED: For account registry lookups, use GlobalAccountsPath() instead.
+// This path is retained for per-town default account selection and quota state.
 func MayorAccountsPath(townRoot string) string {
 	return townRoot + "/" + DirMayor + "/" + FileAccountsJSON
+}
+
+// GlobalAccountsPath returns the path to the global accounts registry.
+// This lives at ~/.claude-accounts/accounts.json and is shared across all towns.
+// Account handles, emails, and config_dir mappings live here.
+// Per-town files (mayor/accounts.json) hold only the default account selection.
+func GlobalAccountsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home + "/.claude-accounts/" + FileAccountsJSON
 }
 
 // MayorQuotaPath returns the path to mayor/quota.json within a town root.
