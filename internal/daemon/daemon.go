@@ -165,19 +165,25 @@ func New(config *Config) (*Daemon, error) {
 			os.Setenv(k, v)
 			logger.Printf("Set env %s=%s from daemon.json", k, v)
 		}
-		// Translate GT_DOLT_PORT → BEADS_DOLT_PORT so that both the beads SDK
-		// (used in-process by convoy manager stores) and bd subprocesses connect
-		// to the correct Dolt server. Without this, towns using non-default ports
-		// (e.g., 3309) fall back to port 3307 and trigger circuit-breaker storms.
+		// NOTE: We no longer translate GT_DOLT_PORT → BEADS_DOLT_SERVER_PORT
+		// globally. In multi-town setups, this translation pollutes ALL bd
+		// subprocesses (including those in other towns) with this town's port,
+		// causing cross-town port conflicts and project_id mismatches.
+		//
+		// bd now uses its own port resolution (port file > config.yaml >
+		// env var > DerivePort) and skips port 3307 inside Gas Town workspaces
+		// to avoid fighting gastown's shared server.
+		//
+		// BEADS_DOLT_PORT is still translated for the in-process beads SDK
+		// (convoy manager stores) which needs to connect to THIS town's server.
 		if gtPort := os.Getenv("GT_DOLT_PORT"); gtPort != "" {
 			if os.Getenv("BEADS_DOLT_PORT") == "" {
 				os.Setenv("BEADS_DOLT_PORT", gtPort)
 				logger.Printf("Set env BEADS_DOLT_PORT=%s (translated from GT_DOLT_PORT)", gtPort)
 			}
-			if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" {
-				os.Setenv("BEADS_DOLT_SERVER_PORT", gtPort)
-				logger.Printf("Set env BEADS_DOLT_SERVER_PORT=%s (translated from GT_DOLT_PORT)", gtPort)
-			}
+			// Deliberately NOT setting BEADS_DOLT_SERVER_PORT — this leaked
+			// across towns and caused bd in other towns to connect to the
+			// wrong Dolt server (port-isolation fix).
 		}
 	}
 
