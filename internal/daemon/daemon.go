@@ -20,6 +20,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -1141,7 +1142,10 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 	// context (checks for active work before declaring something stuck).
 	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
 
-	if err := mgr.Start(false, "", nil); err != nil {
+	// Resolve account for the witness session
+	envOverrides := d.resolveAccountEnvOverrides()
+
+	if err := mgr.Start(false, "", envOverrides); err != nil {
 		if err == witness.ErrAlreadyRunning {
 			// Already running - this is the expected case
 			d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
@@ -1207,7 +1211,10 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	// context (checks for active work before declaring something stuck).
 	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
 
-	if err := mgr.Start(false, ""); err != nil {
+	// Resolve account for the refinery session
+	envOverrides := d.resolveAccountEnvOverrides()
+
+	if err := mgr.Start(false, "", envOverrides...); err != nil {
 		if err == refinery.ErrAlreadyRunning {
 			// Already running - this is the expected case when fix is working
 			d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
@@ -1458,6 +1465,18 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // shared package (e.g. internal/rig) would eliminate the third implementation
 // and reduce drift risk. Not done here due to circular import constraints
 // (daemon cannot import cmd).
+// resolveAccountEnvOverrides resolves the account config dir for this town
+// and returns it as env overrides for witness/refinery Start() methods.
+// Returns nil if no account is configured (agents will use default ~/.claude).
+func (d *Daemon) resolveAccountEnvOverrides() []string {
+	accountsPath := constants.MayorAccountsPath(d.config.TownRoot)
+	configDir, _, err := config.ResolveAccountConfigDir(accountsPath, "")
+	if err != nil || configDir == "" {
+		return nil
+	}
+	return []string{"CLAUDE_CONFIG_DIR=" + configDir}
+}
+
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
 

@@ -99,26 +99,40 @@ type AccountListItem struct {
 }
 
 func runAccountList(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
+	// Load global accounts registry
+	globalCfg, _ := config.LoadGlobalAccountsConfig()
+
+	// Also check per-town config for legacy accounts and default selection
+	var townDefault string
+	townRoot, townErr := workspace.FindFromCwd()
+	if townErr == nil {
+		townPath := constants.MayorAccountsPath(townRoot)
+		if townCfg, err := config.LoadAccountsConfig(townPath); err == nil {
+			townDefault = townCfg.Default
+			// Migrate any town-only accounts to global on read
+			if globalCfg == nil {
+				globalCfg = config.NewAccountsConfig()
+			}
+			for handle, acct := range townCfg.Accounts {
+				if _, exists := globalCfg.Accounts[handle]; !exists {
+					globalCfg.Accounts[handle] = acct
+				}
+			}
+		}
 	}
 
-	accountsPath := constants.MayorAccountsPath(townRoot)
-	cfg, err := config.LoadAccountsConfig(accountsPath)
-	if err != nil {
-		// If file doesn't exist, show empty message
+	cfg := globalCfg
+	if cfg == nil || len(cfg.Accounts) == 0 {
 		fmt.Println("No accounts configured.")
 		fmt.Println("\nTo add an account:")
 		fmt.Println("  gt account add <handle>")
 		return nil
 	}
 
-	if len(cfg.Accounts) == 0 {
-		fmt.Println("No accounts configured.")
-		fmt.Println("\nTo add an account:")
-		fmt.Println("  gt account add <handle>")
-		return nil
+	// Use town default if set, otherwise global default
+	effectiveDefault := townDefault
+	if effectiveDefault == "" {
+		effectiveDefault = cfg.Default
 	}
 
 	// Build list items
@@ -129,7 +143,7 @@ func runAccountList(cmd *cobra.Command, args []string) error {
 			Email:       acct.Email,
 			Description: acct.Description,
 			ConfigDir:   acct.ConfigDir,
-			IsDefault:   handle == cfg.Default,
+			IsDefault:   handle == effectiveDefault,
 		})
 	}
 
@@ -172,15 +186,8 @@ func runAccountList(cmd *cobra.Command, args []string) error {
 func runAccountAdd(cmd *cobra.Command, args []string) error {
 	handle := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-
-	accountsPath := constants.MayorAccountsPath(townRoot)
-
-	// Load existing config or create new
-	cfg, err := config.LoadAccountsConfig(accountsPath)
+	// Load global accounts registry
+	cfg, err := config.LoadGlobalAccountsConfig()
 	if err != nil {
 		cfg = config.NewAccountsConfig()
 	}
@@ -208,29 +215,46 @@ func runAccountAdd(cmd *cobra.Command, args []string) error {
 		style.PrintWarning("could not symlink global commands: %v", err)
 	}
 
-	// Add account
+	// Add account to global registry
 	cfg.Accounts[handle] = config.Account{
 		Email:       accountEmail,
 		Description: accountDescription,
 		ConfigDir:   configDir,
 	}
 
-	// If this is the first account, make it default
+	// If this is the first account, make it global default
 	if cfg.Default == "" {
 		cfg.Default = handle
 	}
 
-	// Save config
-	if err := config.SaveAccountsConfig(accountsPath, cfg); err != nil {
-		return fmt.Errorf("saving accounts config: %w", err)
+	// Save to global registry
+	if err := config.SaveGlobalAccountsConfig(cfg); err != nil {
+		return fmt.Errorf("saving global accounts config: %w", err)
 	}
 
-	fmt.Printf("Added account '%s'\n", handle)
+	// Also save to per-town config for backward compatibility (if in a town)
+	if townRoot, townErr := workspace.FindFromCwd(); townErr == nil {
+		townPath := constants.MayorAccountsPath(townRoot)
+		townCfg, _ := config.LoadAccountsConfig(townPath)
+		if townCfg == nil {
+			townCfg = config.NewAccountsConfig()
+		}
+		townCfg.Accounts[handle] = config.Account{
+			Email:       accountEmail,
+			Description: accountDescription,
+			ConfigDir:   configDir,
+		}
+		if townCfg.Default == "" {
+			townCfg.Default = handle
+		}
+		_ = config.SaveAccountsConfig(townPath, townCfg) // Best-effort
+	}
+
+	fmt.Printf("Added account '%s' (global registry)\n", handle)
 	fmt.Printf("Config directory: %s\n", configDir)
 	fmt.Println()
 	fmt.Println("To complete login, run:")
-	fmt.Printf("  CLAUDE_CONFIG_DIR=%s claude\n", configDir)
-	fmt.Println("Then use /login to authenticate.")
+	fmt.Printf("  gt account login %s\n", handle)
 
 	return nil
 }
@@ -238,6 +262,16 @@ func runAccountAdd(cmd *cobra.Command, args []string) error {
 func runAccountDefault(cmd *cobra.Command, args []string) error {
 	handle := args[0]
 
+	// Check if account exists in global registry
+	globalCfg, _ := config.LoadGlobalAccountsConfig()
+	found := false
+	if globalCfg != nil {
+		if _, exists := globalCfg.Accounts[handle]; exists {
+			found = true
+		}
+	}
+
+	// Also check per-town config
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
@@ -246,23 +280,24 @@ func runAccountDefault(cmd *cobra.Command, args []string) error {
 	accountsPath := constants.MayorAccountsPath(townRoot)
 	cfg, err := config.LoadAccountsConfig(accountsPath)
 	if err != nil {
-		return fmt.Errorf("loading accounts config: %w", err)
+		cfg = config.NewAccountsConfig()
 	}
 
-	// Check if account exists
-	if _, exists := cfg.Accounts[handle]; !exists {
-		return fmt.Errorf("account '%s' not found", handle)
+	if !found {
+		if _, exists := cfg.Accounts[handle]; !exists {
+			return fmt.Errorf("account '%s' not found (checked global and town registries)", handle)
+		}
 	}
 
-	// Update default
+	// Update per-town default
 	cfg.Default = handle
 
-	// Save config
+	// Save per-town config
 	if err := config.SaveAccountsConfig(accountsPath, cfg); err != nil {
 		return fmt.Errorf("saving accounts config: %w", err)
 	}
 
-	fmt.Printf("Default account set to '%s'\n", handle)
+	fmt.Printf("Default account set to '%s' (for this town)\n", handle)
 	return nil
 }
 
@@ -357,6 +392,10 @@ func runAccountStatus(cmd *cobra.Command, args []string) error {
 func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	targetHandle := args[0]
 
+	// Load global registry for account lookup
+	globalCfg, _ := config.LoadGlobalAccountsConfig()
+
+	// Also load per-town for the default selection and legacy accounts
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
@@ -365,14 +404,18 @@ func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	accountsPath := constants.MayorAccountsPath(townRoot)
 	cfg, err := config.LoadAccountsConfig(accountsPath)
 	if err != nil {
-		return fmt.Errorf("loading accounts config: %w", err)
+		cfg = config.NewAccountsConfig()
 	}
 
-	// Check if target account exists
-	targetAcct := cfg.GetAccount(targetHandle)
+	// Check if target account exists (global first, then town)
+	targetAcct := lookupAccountGlobalThenTown(targetHandle)
 	if targetAcct == nil {
-		// List available accounts
 		var handles []string
+		if globalCfg != nil {
+			for h := range globalCfg.Accounts {
+				handles = append(handles, h)
+			}
+		}
 		for h := range cfg.Accounts {
 			handles = append(handles, h)
 		}
@@ -396,15 +439,25 @@ func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	// Determine current account (if any) by checking symlink target
 	var currentHandle string
 	if err == nil && fileInfo.Mode()&os.ModeSymlink != 0 {
-		// It's a symlink - find which account it points to
+		// It's a symlink - find which account it points to (check global + town)
 		linkTarget, err := os.Readlink(claudeDir)
 		if err != nil {
 			return fmt.Errorf("reading symlink: %w", err)
 		}
-		for h, acct := range cfg.Accounts {
-			if acct.ConfigDir == linkTarget {
-				currentHandle = h
-				break
+		if globalCfg != nil {
+			for h, acct := range globalCfg.Accounts {
+				if acct.ConfigDir == linkTarget {
+					currentHandle = h
+					break
+				}
+			}
+		}
+		if currentHandle == "" {
+			for h, acct := range cfg.Accounts {
+				if acct.ConfigDir == linkTarget {
+					currentHandle = h
+					break
+				}
 			}
 		}
 	}
@@ -531,22 +584,15 @@ Examples:
 func runAccountLogin(cmd *cobra.Command, args []string) error {
 	handle := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-
-	accountsPath := constants.MayorAccountsPath(townRoot)
-	cfg, err := config.LoadAccountsConfig(accountsPath)
-	if err != nil {
-		return fmt.Errorf("loading accounts config: %w", err)
-	}
-
-	acct := cfg.GetAccount(handle)
+	// Look up account from global registry first, then per-town
+	acct := lookupAccountGlobalThenTown(handle)
 	if acct == nil {
+		globalCfg, _ := config.LoadGlobalAccountsConfig()
 		var handles []string
-		for h := range cfg.Accounts {
-			handles = append(handles, h)
+		if globalCfg != nil {
+			for h := range globalCfg.Accounts {
+				handles = append(handles, h)
+			}
 		}
 		sort.Strings(handles)
 		return fmt.Errorf("account '%s' not found. Available accounts: %v", handle, handles)
@@ -628,21 +674,16 @@ func runAccountRename(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("old and new handles are the same")
 	}
 
-	townRoot, err := workspace.FindFromCwd()
+	// Load global registry
+	cfg, err := config.LoadGlobalAccountsConfig()
 	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-
-	accountsPath := constants.MayorAccountsPath(townRoot)
-	cfg, err := config.LoadAccountsConfig(accountsPath)
-	if err != nil {
-		return fmt.Errorf("loading accounts config: %w", err)
+		return fmt.Errorf("loading global accounts config: %w", err)
 	}
 
 	// Check old handle exists
 	oldAcct, exists := cfg.Accounts[oldHandle]
 	if !exists {
-		return fmt.Errorf("account '%s' not found", oldHandle)
+		return fmt.Errorf("account '%s' not found in global registry", oldHandle)
 	}
 
 	// Check new handle doesn't exist
@@ -701,11 +742,92 @@ func runAccountRename(cmd *cobra.Command, args []string) error {
 		cfg.Default = newHandle
 	}
 
-	if err := config.SaveAccountsConfig(accountsPath, cfg); err != nil {
-		return fmt.Errorf("saving accounts config: %w", err)
+	// Save to global registry
+	if err := config.SaveGlobalAccountsConfig(cfg); err != nil {
+		return fmt.Errorf("saving global accounts config: %w", err)
+	}
+
+	// Also update per-town config if it references this account
+	if townRoot, townErr := workspace.FindFromCwd(); townErr == nil {
+		townPath := constants.MayorAccountsPath(townRoot)
+		if townCfg, loadErr := config.LoadAccountsConfig(townPath); loadErr == nil {
+			changed := false
+			if _, exists := townCfg.Accounts[oldHandle]; exists {
+				delete(townCfg.Accounts, oldHandle)
+				townCfg.Accounts[newHandle] = oldAcct
+				townCfg.Accounts[newHandle] = config.Account{
+					Email:       oldAcct.Email,
+					Description: oldAcct.Description,
+					ConfigDir:   newDir,
+				}
+				changed = true
+			}
+			if townCfg.Default == oldHandle {
+				townCfg.Default = newHandle
+				changed = true
+			}
+			if changed {
+				_ = config.SaveAccountsConfig(townPath, townCfg) // Best-effort
+			}
+		}
 	}
 
 	fmt.Printf("Renamed account '%s' → '%s'\n", oldHandle, newHandle)
+	return nil
+}
+
+var accountMigrateCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Migrate per-town accounts to global registry",
+	Long: `Migrate account registrations from this town's mayor/accounts.json
+to the global registry at ~/.claude-accounts/accounts.json.
+
+Existing global accounts with the same handle are NOT overwritten.
+This is a one-time migration to enable cross-town account sharing.
+
+Examples:
+  gt account migrate`,
+	RunE: runAccountMigrate,
+}
+
+func runAccountMigrate(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	townPath := constants.MayorAccountsPath(townRoot)
+	migrated, err := config.MigrateAccountsToGlobal(townPath)
+	if err != nil {
+		return fmt.Errorf("migrating accounts: %w", err)
+	}
+
+	if migrated == 0 {
+		fmt.Println("No new accounts to migrate (all already in global registry).")
+	} else {
+		fmt.Printf("Migrated %d account(s) to global registry.\n", migrated)
+	}
+	return nil
+}
+
+// lookupAccountGlobalThenTown looks up an account by handle, checking the global
+// registry first, then falling back to the per-town config (if in a town).
+func lookupAccountGlobalThenTown(handle string) *config.Account {
+	// Check global registry first
+	if globalCfg, err := config.LoadGlobalAccountsConfig(); err == nil {
+		if acct := globalCfg.GetAccount(handle); acct != nil {
+			return acct
+		}
+	}
+	// Fall back to per-town config
+	if townRoot, err := workspace.FindFromCwd(); err == nil {
+		townPath := constants.MayorAccountsPath(townRoot)
+		if townCfg, err := config.LoadAccountsConfig(townPath); err == nil {
+			if acct := townCfg.GetAccount(handle); acct != nil {
+				return acct
+			}
+		}
+	}
 	return nil
 }
 
@@ -724,6 +846,7 @@ func init() {
 	accountCmd.AddCommand(accountSwitchCmd)
 	accountCmd.AddCommand(accountLoginCmd)
 	accountCmd.AddCommand(accountRenameCmd)
+	accountCmd.AddCommand(accountMigrateCmd)
 
 	rootCmd.AddCommand(accountCmd)
 }
