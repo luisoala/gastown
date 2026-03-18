@@ -22,7 +22,7 @@ import (
 var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 // DefaultDatabases is the static fallback list of known production databases.
-var DefaultDatabases = []string{"hq", "beads", "gastown"}
+var DefaultDatabases = []string{"hq", "cp", "dma", "dma_paper", "info_frontier", "thesis"}
 
 // testPollutionPrefixes are database name prefixes created by tests.
 var testPollutionPrefixes = []string{"testdb_", "beads_t", "beads_pt", "doctest_"}
@@ -58,7 +58,7 @@ func DiscoverDatabases(host string, port int) []string {
 		if err := rows.Scan(&name); err != nil {
 			continue
 		}
-		if name == "information_schema" || name == "mysql" {
+		if name == "information_schema" || name == "mysql" || name == "dolt" || name == "gastown_tales" {
 			continue
 		}
 		lower := strings.ToLower(name)
@@ -468,11 +468,14 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		}
 		commitMsg := fmt.Sprintf("reaper: purge %d closed wisps from %s", totalDeleted, dbName)
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// Non-fatal — log but continue.
-			anomalies = append(anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after purge failed: %v", err),
-			})
+			// "nothing to commit" is benign — Dolt auto-commits DML in server mode,
+			// so the working set already matches HEAD after the SQL COMMIT above.
+			if !isNothingToCommit(err) {
+				anomalies = append(anomalies, Anomaly{
+					Type:    "dolt_commit_failed",
+					Message: fmt.Sprintf("dolt commit after purge failed: %v", err),
+				})
+			}
 		}
 	}
 
