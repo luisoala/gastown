@@ -349,7 +349,7 @@ func init() {
 	// Shared flags
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
-		cmd.Flags().IntVar(&reaperPort, "port", 3307, "Dolt server port")
+		cmd.Flags().IntVar(&reaperPort, "port", 3309, "Dolt server port")
 		cmd.Flags().BoolVar(&reaperDryRun, "dry-run", false, "Report what would happen without acting")
 	}
 
