@@ -29,6 +29,27 @@ after inspecting tmux pane output for signs of life.
 
 Reference: WAR-ROOM-SERIAL-KILLER.md, commit f3d47a96.
 
+## Scope — What You May and May NOT Touch
+
+**IN SCOPE** (these are the ONLY sessions this plugin may inspect or act on):
+- Polecat sessions (`<rig>-polecat-<name>`)
+- Deacon session (`hq-deacon`)
+
+**OUT OF SCOPE — NEVER touch these, under any circumstances:**
+- **Crew sessions** (`<rig>-crew-<name>`, e.g. `gastown-crew-bear`). Crew lifecycle
+  is managed by the overseer (human), not dogs. Crew members are persistent,
+  long-lived, and user-managed. A crew session that looks idle is NOT stuck — it
+  is waiting for its human. Killing a crew session destroys the overseer's active
+  workspace and is a **critical incident**.
+- **Mayor session** (`hq-mayor`)
+- **Witness sessions** (`<rig>-witness`)
+- **Refinery sessions** (`<rig>-refinery`)
+- Any session not explicitly enumerated by the bash scripts in Steps 1-3
+
+**This scope is absolute.** Do NOT extend it based on your own judgment. The bash
+scripts enumerate exactly the sessions you should check. If a session does not
+appear in `CRASHED[]` or `STUCK[]` arrays, it does not exist for your purposes.
+
 ## Step 1: Enumerate agents to check
 
 Gather all polecats and the deacon session. We check both crashed sessions
@@ -38,15 +59,39 @@ Gather all polecats and the deacon session. We check both crashed sessions
 echo "=== Stuck Agent Dog: Checking agent health ==="
 
 TOWN_ROOT="$HOME/gt"
+RIGS_JSON_PATH="${TOWN_ROOT}/rigs.json"
 
-# Get all rig names
-RIG_JSON=$(gt rig list --json 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$RIG_JSON" ]; then
-  echo "SKIP: could not get rig list"
+# Fallback for older/runtime-copied layouts that still expose rigs.json under mayor/.
+if [ ! -f "$RIGS_JSON_PATH" ] && [ -f "$TOWN_ROOT/mayor/rigs.json" ]; then
+  RIGS_JSON_PATH="$TOWN_ROOT/mayor/rigs.json"
+fi
+
+# Read rigs.json for rig names and beads prefixes
+# CRITICAL: We need both the rig name (for filesystem paths like $TOWN_ROOT/$RIG/polecats/)
+# and the beads prefix (for tmux session names like $PREFIX-polecat-$NAME).
+# These can differ — e.g. rig "cfutons" may have prefix "CF".
+if [ ! -f "$RIGS_JSON_PATH" ]; then
+  echo "SKIP: rigs.json not found at $RIGS_JSON_PATH"
   exit 0
 fi
 
-RIG_NAMES=$(echo "$RIG_JSON" | jq -r '.[].name // empty' 2>/dev/null)
+if ! RIG_PREFIX_MAP=$(jq -r '
+  if (.rigs | type) == "object" then
+    .rigs | to_entries[] | "\(.key)|\(.value.beads.prefix // .key)"
+  else
+    empty
+  end
+' "$RIGS_JSON_PATH" 2>/dev/null); then
+  echo "SKIP: could not parse rigs.json"
+  exit 0
+fi
+
+# Filter out any malformed/blank rows so partial registry state fails safe.
+RIG_PREFIX_MAP=$(printf '%s\n' "$RIG_PREFIX_MAP" | awk -F'|' 'NF >= 2 && $1 != "" && $2 != ""')
+if [ -z "$RIG_PREFIX_MAP" ]; then
+  echo "SKIP: no rigs found in rigs.json"
+  exit 0
+fi
 ```
 
 ## Step 2: Check polecat health
@@ -61,7 +106,8 @@ CRASHED=()
 STUCK=()
 HEALTHY=0
 
-for RIG in $RIG_NAMES; do
+while IFS='|' read -r RIG PREFIX; do
+  [ -z "$RIG" ] && continue
   # List polecat directories
   POLECAT_DIR="$TOWN_ROOT/$RIG/polecats"
   [ -d "$POLECAT_DIR" ] || continue
@@ -69,7 +115,8 @@ for RIG in $RIG_NAMES; do
   for PCAT_PATH in "$POLECAT_DIR"/*/; do
     [ -d "$PCAT_PATH" ] || continue
     PCAT_NAME=$(basename "$PCAT_PATH")
-    SESSION_NAME="${RIG}-polecat-${PCAT_NAME}"
+    # Use beads prefix (not rig name) for tmux session name
+    SESSION_NAME="${PREFIX}-polecat-${PCAT_NAME}"
 
     # Check if session exists
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -78,11 +125,15 @@ for RIG in $RIG_NAMES; do
         | jq -r '.hook_bead // empty' 2>/dev/null)
 
       if [ -n "$HOOK_BEAD" ]; then
-        # Check agent_state to avoid interfering with active spawning
+        # Check agent_state to avoid false alerts for intentional shutdowns
         AGENT_STATE=$(bd show "$RIG/polecats/$PCAT_NAME" --json 2>/dev/null \
           | jq -r '.agent_state // empty' 2>/dev/null)
         if [ "$AGENT_STATE" = "spawning" ]; then
           echo "  SKIP $SESSION_NAME: agent_state=spawning (sling in progress)"
+          continue
+        fi
+        if [ "$AGENT_STATE" = "done" ] || [ "$AGENT_STATE" = "nuked" ]; then
+          echo "  SKIP $SESSION_NAME: agent_state=$AGENT_STATE (intentional shutdown, not a crash)"
           continue
         fi
         CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
@@ -114,7 +165,7 @@ for RIG in $RIG_NAMES; do
       fi
     fi
   done
-done
+done <<< "$RIG_PREFIX_MAP"
 
 echo ""
 echo "Health summary: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, $HEALTHY healthy"
@@ -136,20 +187,24 @@ if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   DEACON_ISSUE="crashed"
 else
   # Check deacon heartbeat file
-  HEARTBEAT_FILE="$TOWN_ROOT/deacon/.deacon-heartbeat"
+  HEARTBEAT_FILE="$TOWN_ROOT/deacon/heartbeat.json"
   if [ -f "$HEARTBEAT_FILE" ]; then
-    HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
-    NOW=$(date +%s)
-    HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
+    HEARTBEAT_TIME=$(jq -r '(.timestamp // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // empty' "$HEARTBEAT_FILE" 2>/dev/null)
+    if [ -n "$HEARTBEAT_TIME" ]; then
+      NOW=$(date +%s)
+      HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
 
-    if [ "$HEARTBEAT_AGE" -gt 600 ]; then
-      echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >10m threshold)"
-      DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+      if [ "$HEARTBEAT_AGE" -gt 900 ]; then
+        echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >15m threshold)"
+        DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+      else
+        echo "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"
+      fi
     else
-      echo "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"
+      echo "  WARN: Could not parse heartbeat timestamp from $HEARTBEAT_FILE"
     fi
   else
-    echo "  WARN: No heartbeat file found"
+    echo "  WARN: No heartbeat file found at $HEARTBEAT_FILE"
   fi
 fi
 ```
@@ -158,6 +213,11 @@ fi
 
 **This is the key difference from daemon blind-kill.** For each crashed or stuck
 agent, inspect the tmux pane context to determine if restart is appropriate.
+
+**SCOPE REMINDER: You may ONLY act on entries in the `CRASHED[]` and `STUCK[]`
+arrays populated by Steps 2-3. These arrays contain ONLY polecats and deacon.
+Do NOT inspect, evaluate, or act on ANY other sessions (crew, mayor, witness,
+refinery). If you find yourself considering a session not in these arrays, STOP.**
 
 **You (the dog agent) must evaluate each case:**
 

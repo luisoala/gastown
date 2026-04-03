@@ -215,3 +215,8 @@ func ValidateKeychainToken(configDir string) error {
 	// Token present but format unrecognized — assume valid.
 	return nil
 }
+
+// SyncSwappedTokens propagates fresh tokens from source accounts to target
+// keychain entries after quota rotation swaps. On Linux this is a no-op
+// since credentials are file-based (already swapped by SwapOAuthAccount).
+func SyncSwappedTokens(_ map[string]string) int { return 0 }

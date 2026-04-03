@@ -3,12 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -38,6 +35,37 @@ func inferRigFromCwd(townRoot string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not infer rig from current directory")
+}
+
+// inferRigFromCrewName scans all rigs in the town root for a crew member
+// with the given name. Returns the rig name if the crew member is unique
+// across all rigs. Returns an error if not found or ambiguous.
+func inferRigFromCrewName(townRoot, crewName string) (string, error) {
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("reading town root: %w", err)
+	}
+
+	var matches []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		crewPath := filepath.Join(townRoot, entry.Name(), "crew", crewName)
+		if info, err := os.Stat(crewPath); err == nil && info.IsDir() {
+			matches = append(matches, entry.Name())
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no rig found with crew member %q", crewName)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("crew member %q exists in multiple rigs: %s (use --rig to specify)",
+			crewName, strings.Join(matches, ", "))
+	}
 }
 
 // parseRigSlashName parses "rig/name" format into separate rig and name parts.
@@ -79,63 +107,6 @@ func isInSameTmuxSocket() bool {
 	return tmux.IsInSameSocket()
 }
 
-// attachToTmuxSession attaches to a tmux session.
-// If already inside tmux, uses switch-client instead of attach-session.
-// Uses syscall.Exec to replace the Go process with tmux for direct terminal
-// control, and passes -u for UTF-8 support regardless of locale settings.
-// See: https://github.com/steveyegge/gastown/issues/1219
-func attachToTmuxSession(sessionID string) error {
-	tmuxPath, err := exec.LookPath("tmux")
-	if err != nil {
-		return fmt.Errorf("tmux not found: %w", err)
-	}
-
-	// Base args with UTF-8 and socket support
-	baseArgs := []string{"tmux", "-u"}
-	if socket := tmux.GetDefaultSocket(); socket != "" {
-		baseArgs = append(baseArgs, "-L", socket)
-	}
-
-	var args []string
-	inSameSocket := isInSameTmuxSocket()
-	if inSameSocket {
-		// Same tmux socket: switch to the target session
-		args = append(baseArgs, "switch-client", "-t", sessionID)
-	} else {
-		// Outside tmux or different socket: attach to the session
-		args = append(baseArgs, "attach-session", "-t", sessionID)
-	}
-
-	// Debug: show what we're about to exec (remove after fixing tmux 3.6 issue)
-	if os.Getenv("GT_DEBUG_ATTACH") != "" {
-		fmt.Fprintf(os.Stderr, "DEBUG attach: inSameSocket=%v socket=%q session=%q\n",
-			inSameSocket, tmux.GetDefaultSocket(), sessionID)
-		fmt.Fprintf(os.Stderr, "DEBUG attach: stdin_fd=%d stdout_fd=%d stderr_fd=%d\n",
-			os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd())
-		fmt.Fprintf(os.Stderr, "DEBUG attach: TMUX=%q TMUX_PANE=%q\n",
-			os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
-		fmt.Fprintf(os.Stderr, "DEBUG attach: exec args=%v\n", args)
-		fmt.Fprintf(os.Stderr, "DEBUG attach: tmuxPath=%s\n", tmuxPath)
-		// Check /proc/self/fd/0 to see what stdin actually points to
-		if link, err := os.Readlink("/proc/self/fd/0"); err == nil {
-			fmt.Fprintf(os.Stderr, "DEBUG attach: /proc/self/fd/0 -> %s\n", link)
-		}
-		if link, err := os.Readlink("/proc/self/fd/1"); err == nil {
-			fmt.Fprintf(os.Stderr, "DEBUG attach: /proc/self/fd/1 -> %s\n", link)
-		}
-	}
-
-	// Reset file descriptors to blocking mode before exec.
-	// Go's runtime sets them to non-blocking for its internal poller,
-	// which causes tmux 3.6+ to fail with "open terminal failed: not a terminal".
-	for _, fd := range []int{0, 1, 2} {
-		syscall.SetNonblock(fd, false)
-	}
-
-	// Replace the Go process with tmux for direct terminal control
-	return syscall.Exec(tmuxPath, args, os.Environ())
-}
-
 // isShellCommand checks if the command is a shell (meaning the runtime has exited).
 func isShellCommand(cmd string) bool {
 	shells := constants.SupportedShells
@@ -145,62 +116,6 @@ func isShellCommand(cmd string) bool {
 		}
 	}
 	return false
-}
-
-// execAgent execs the configured agent, replacing the current process.
-// Used when we're already in the target session and just need to start the agent.
-// If prompt is provided, it's passed as the initial prompt.
-func execAgent(cfg *config.RuntimeConfig, prompt string) error {
-	if cfg == nil {
-		cfg = config.DefaultRuntimeConfig()
-	}
-
-	agentPath, err := exec.LookPath(cfg.Command)
-	if err != nil {
-		return fmt.Errorf("%s not found: %w", cfg.Command, err)
-	}
-
-	// Reset file descriptors to blocking mode before exec (Go sets non-blocking).
-	for _, fd := range []int{0, 1, 2} {
-		syscall.SetNonblock(fd, false)
-	}
-
-	// exec replaces current process with agent
-	// args[0] must be the command name (convention for exec)
-	args := append([]string{cfg.Command}, cfg.Args...)
-	if prompt != "" {
-		args = append(args, prompt)
-	}
-	return syscall.Exec(agentPath, args, os.Environ())
-}
-
-// execRuntime execs the runtime CLI, replacing the current process.
-// Used when we're already in the target session and just need to start the runtime.
-// If prompt is provided, it's passed according to the runtime's prompt mode.
-func execRuntime(prompt, rigPath, configDir string) error {
-	townRoot := filepath.Dir(rigPath)
-	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, rigPath)
-	args := runtimeConfig.BuildArgsWithPrompt(prompt)
-	if len(args) == 0 {
-		return fmt.Errorf("runtime command not configured")
-	}
-
-	binPath, err := exec.LookPath(args[0])
-	if err != nil {
-		return fmt.Errorf("runtime command not found: %w", err)
-	}
-
-	// Reset file descriptors to blocking mode before exec (Go sets non-blocking).
-	for _, fd := range []int{0, 1, 2} {
-		syscall.SetNonblock(fd, false)
-	}
-
-	env := os.Environ()
-	if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && configDir != "" {
-		env = append(env, fmt.Sprintf("%s=%s", runtimeConfig.Session.ConfigDirEnv, configDir))
-	}
-
-	return syscall.Exec(binPath, args, env)
 }
 
 // ensureDefaultBranch checks if a git directory is on the default branch.

@@ -13,29 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create pipe: %v", err)
-	}
-	os.Stdout = w
-
-	fn()
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	_ = r.Close()
-
-	return buf.String()
-}
-
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stderr
@@ -195,6 +172,38 @@ func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 	indicator := buildStatusIndicator(agent)
 	if strings.Contains(indicator, "○") {
 		t.Fatal("alive agent (Running=true) should not show ○ indicator")
+	}
+}
+
+func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
+	agent := AgentRuntime{Running: true, NotificationLevel: beads.NotifyMuted}
+	indicator := buildStatusIndicator(agent)
+	if !strings.Contains(indicator, "🔕") {
+		t.Fatalf("expected muted indicator to include 🔕, got %q", indicator)
+	}
+}
+
+func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
+	status := TownStatus{
+		Name:     "gt",
+		Location: "/tmp/gt",
+		DND: &DNDInfo{
+			Enabled: true,
+			Level:   beads.NotifyMuted,
+			Agent:   "hq-mayor",
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, status); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "DND:") {
+		t.Fatalf("expected DND section in status output, got: %q", out)
+	}
+	if !strings.Contains(out, "on") {
+		t.Fatalf("expected DND state 'on' in status output, got: %q", out)
 	}
 }
 

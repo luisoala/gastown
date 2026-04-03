@@ -66,7 +66,7 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 	}
 
 	// Issue #288: Auto-apply formula for batch sling (resolved via flags)
-	formulaName := resolveFormula(slingFormula, slingHookRawBead)
+	formulaName := resolveFormula(slingFormula, slingHookRawBead, filepath.Dir(townBeadsDir), rigName)
 
 	if slingDryRun {
 		fmt.Printf("%s Batch slinging %d beads to rig '%s':\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
@@ -154,6 +154,7 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 			NoConvoy:         slingNoConvoy,
 			Owned:            slingOwned,
 			NoMerge:          slingNoMerge,
+			ReviewOnly:       slingReviewOnly,
 			Force:            slingForce,
 			HookRawBead:      slingHookRawBead,
 			NoBoot:           slingNoBoot,

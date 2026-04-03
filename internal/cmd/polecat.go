@@ -390,11 +390,14 @@ type PolecatListItem struct {
 }
 
 // effectivePolecatState returns the observable state used by polecat list output.
-// Session liveness is ground truth for working/done transitions. Zombie entries
+// Session liveness is ground truth for working/idle/done transitions. Zombie entries
 // are never auto-rewritten.
 func effectivePolecatState(item PolecatListItem) polecat.State {
 	state := item.State
-	if item.SessionRunning && state == polecat.StateDone {
+	// A running session overrides both "done" and "idle" — the polecat is working.
+	// "idle" can be stale when a polecat is reused (cross-rig beads, stale heartbeat,
+	// or beads query timing), and "done" can be stale when gt done didn't complete.
+	if item.SessionRunning && (state == polecat.StateDone || state == polecat.StateIdle) {
 		return polecat.StateWorking
 	}
 	if !item.SessionRunning && !item.Zombie && state == polecat.StateWorking {
@@ -422,7 +425,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 
 	if polecatListAll {
 		// List all rigs
-		allRigs, _, err := getAllRigs()
+		allRigs, err := getAllRigs()
 		if err != nil {
 			return err
 		}
@@ -1356,6 +1359,11 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 	} else {
 		fmt.Printf("  %s closed agent bead %s\n", style.Success.Render("✓"), agentBeadID)
 	}
+
+	// Step 6: Purge closed ephemeral beads (wisps) accumulated during sessions.
+	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol
+	// cycles, etc. accumulate across sessions and pollute bd ready/list (hq-6161m).
+	purgeClosedEphemeralBeads(bd)
 
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -69,9 +70,17 @@ func (c *DoltMetadataCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 	rigs := c.loadRigs(rigsPath)
 	for rigName := range rigs {
-		// Only check rigs that have a dolt database
+		// Resolve the expected DB name: some rigs use their prefix as the
+		// database name (e.g., "lc" for laneassist) rather than the rig name.
+		// Check both rig name and prefix in .dolt-data/. (gt-85w7)
+		expectedDB := rigName
+		prefix := config.GetRigPrefix(ctx.TownRoot, rigName)
 		if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
-			continue
+			// Rig name not found — check if prefix-named DB exists
+			if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); os.IsNotExist(err) {
+				continue // No database under either name
+			}
+			expectedDB = prefix
 		}
 
 		beadsDir := c.findRigBeadsDir(ctx.TownRoot, rigName)
@@ -81,7 +90,7 @@ func (c *DoltMetadataCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		if !c.hasDoltMetadata(beadsDir, rigName) {
+		if !c.hasDoltMetadata(beadsDir, expectedDB) {
 			relPath, _ := filepath.Rel(ctx.TownRoot, beadsDir)
 			missing = append(missing, rigName+" ("+relPath+")")
 			c.missingMetadata = append(c.missingMetadata, rigName)
@@ -168,11 +177,23 @@ func (c *DoltMetadataCheck) writeDoltMetadata(townRoot, rigName string) error {
 		_ = json.Unmarshal(data, &existing)
 	}
 
+	// Resolve the correct database name. Some rigs use their prefix as the
+	// DB name (e.g., "lc" for laneassist). Preserve existing dolt_database
+	// if it matches a known prefix; otherwise fall back to rig name. (gt-85w7)
+	dbName := rigName
+	if existingDB, ok := existing["dolt_database"].(string); ok && existingDB != "" {
+		// Preserve the existing DB name if it's a known prefix
+		prefix := config.GetRigPrefix(townRoot, rigName)
+		if existingDB == prefix {
+			dbName = existingDB
+		}
+	}
+
 	// Set dolt server fields
 	existing["database"] = "dolt"
 	existing["backend"] = "dolt"
 	existing["dolt_mode"] = "server"
-	existing["dolt_database"] = rigName
+	existing["dolt_database"] = dbName
 
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
@@ -296,13 +317,13 @@ func (c *DoltServerReachableCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // findServerModeRigsByAddr returns rig names grouped by their configured server address.
-// Rigs without explicit host/port fall back to the default local server (127.0.0.1:3307).
+// Rigs without explicit host/port fall back to the port from config.yaml or daemon.json.
 func (c *DoltServerReachableCheck) findServerModeRigsByAddr(townRoot string) map[string][]string {
 	result := make(map[string][]string)
 
 	// Check town-level beads (hq)
 	townBeadsDir := filepath.Join(townRoot, ".beads")
-	if addr, ok := c.getServerAddr(townBeadsDir); ok {
+	if addr, ok := c.getServerAddr(townBeadsDir, townRoot); ok {
 		result[addr] = append(result[addr], "hq")
 	}
 
@@ -315,7 +336,7 @@ func (c *DoltServerReachableCheck) findServerModeRigsByAddr(townRoot string) map
 		if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 			beadsDir = filepath.Join(townRoot, rigName, ".beads")
 		}
-		if addr, ok := c.getServerAddr(beadsDir); ok {
+		if addr, ok := c.getServerAddr(beadsDir, townRoot); ok {
 			result[addr] = append(result[addr], rigName)
 		}
 	}
@@ -325,7 +346,9 @@ func (c *DoltServerReachableCheck) findServerModeRigsByAddr(townRoot string) map
 
 // getServerAddr reads metadata.json and returns the configured server address if dolt_mode is "server".
 // Returns the address string (host:port) and true if server mode is configured.
-func (c *DoltServerReachableCheck) getServerAddr(beadsDir string) (string, bool) {
+// townRoot is used to read the effective port from config.yaml when metadata.json
+// doesn't specify one, avoiding a hardcoded fallback to 3307.
+func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot string) (string, bool) {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
@@ -347,6 +370,13 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string) (string, bool)
 	port := metadata.DoltServerPort
 	if host == "" {
 		host = "127.0.0.1"
+	}
+	if port == 0 {
+		// Use the same port resolution as Start/Stop/Status: config.yaml takes
+		// precedence over GT_DOLT_PORT env var, which takes precedence over
+		// daemon.json, which falls back to DefaultPort (3307). This ensures
+		// the doctor probes the same port that the server actually uses.
+		port = doltserver.DefaultConfig(townRoot).Port
 	}
 	if port == 0 {
 		port = doltserver.DefaultPort

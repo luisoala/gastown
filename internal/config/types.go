@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -67,6 +68,12 @@ type TownSettings struct {
 	// Example: {"mayor": "claude-opus", "witness": "claude-haiku", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
+	// CrewAgents maps individual crew worker names to agent aliases at the town level.
+	// This allows town-wide per-crew agent assignment without modifying each rig's config.
+	// Resolution: --agent flag > rig WorkerAgents > town CrewAgents > role agents > defaults.
+	// Example: {"bob": "codex", "alice": "claude"}
+	CrewAgents map[string]string `json:"crew_agents,omitempty"`
+
 	// AgentEmailDomain is the domain used for agent git identity emails.
 	// Agent addresses like "gastown/crew/jack" become "gastown.crew.jack@{domain}".
 	// Default: "gastown.local"
@@ -96,6 +103,16 @@ type TownSettings struct {
 	// These were previously hardcoded as Go constants throughout the codebase.
 	// All values are optional — omitted values use compiled-in defaults.
 	Operational *OperationalConfig `json:"operational,omitempty"`
+
+	// DisabledPatrols lists patrol names to disable at the town level.
+	// This provides a simple way to turn off individual daemon patrol dogs
+	// without editing mayor/daemon.json. Patrol names match the keys used
+	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
+	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
+	// "dolt_remotes", "dolt_backup", "jsonl_git_backup", "scheduled_maintenance",
+	// "main_branch_test", "handler").
+	// Example: ["doctor_dog", "compactor_dog"]
+	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
 }
 
 // NewTownSettings creates a new TownSettings with defaults.
@@ -288,6 +305,19 @@ type DaemonThresholds struct {
 	// DogIdleRemoveTimeout is how long a dog can be idle before removal (default "4h").
 	DogIdleRemoveTimeout string `json:"dog_idle_remove_timeout,omitempty"`
 
+	// PolecatIdleSessionTimeout is how long a polecat can be idle before its session
+	// is killed to prevent API slot burn (default "15m"). Polecats are ephemeral workers;
+	// unlike dogs, they should not persist when idle.
+	PolecatIdleSessionTimeout string `json:"polecat_idle_session_timeout,omitempty"`
+
+	// PolecatSelfTerminate controls whether polecats kill their own session after
+	// gt done completes (default false). When true, polecats terminate 3 seconds
+	// after work submission instead of transitioning to IDLE. This gives fresh
+	// context windows per task, reduces token waste, and eliminates stale state
+	// issues at scale. Worktree reuse is preserved — ReuseIdlePolecat creates
+	// a fresh branch on the existing worktree.
+	PolecatSelfTerminate *bool `json:"polecat_self_terminate,omitempty"`
+
 	// StaleWorkingTimeout is how long a dog in state=working with no activity
 	// before considered stuck (default "2h").
 	StaleWorkingTimeout string `json:"stale_working_timeout,omitempty"`
@@ -313,6 +343,20 @@ type DaemonThresholds struct {
 
 	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
 	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
+
+	// PressureCPUThreshold is the per-core load average above which new
+	// non-infrastructure spawns are deferred. Disabled by default (0).
+	// Recommended starting value: 3.0 (only trips under severe load).
+	PressureCPUThreshold *float64 `json:"pressure_cpu_threshold,omitempty"`
+
+	// PressureMemThresholdGB is the minimum available memory (in GB) below
+	// which new non-infrastructure spawns are deferred. Disabled by default (0).
+	// Recommended starting value: 0.5 (only trips when swapping).
+	PressureMemThresholdGB *float64 `json:"pressure_mem_threshold_gb,omitempty"`
+
+	// PressureMaxSessions is the maximum number of concurrent agent tmux
+	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
+	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.
@@ -394,6 +438,11 @@ type MailThresholds struct {
 
 	// MaxConcurrentAckOps is max concurrent mail acknowledge operations (default 8).
 	MaxConcurrentAckOps *int `json:"max_concurrent_ack_ops,omitempty"`
+
+	// ReplyReminderDelay is how long after mail delivery to nudge the recipient
+	// to reply via gt mail send rather than in chat (default "30s").
+	// Set to "0s" to disable reply reminders entirely.
+	ReplyReminderDelay string `json:"reply_reminder_delay,omitempty"`
 }
 
 // WebThresholds configures web API thresholds.
@@ -681,6 +730,17 @@ type RuntimeConfig struct {
 	// Instructions controls the per-workspace instruction file name.
 	Instructions *RuntimeInstructionsConfig `json:"instructions,omitempty"`
 
+	// ACP configures ACP (Agent Communication Protocol) support.
+	// When set, the agent can run in ACP mode. If nil, ACP support is
+	// determined by matching the Command to a known preset with ACP config.
+	ACP *ACPConfig `json:"acp,omitempty"`
+
+	// ExecWrapper is a command prefix inserted between environment variables
+	// and the agent binary in the startup command. Used for sandboxed execution.
+	// Example: ["exitbox", "run", "--profile=gastown-polecat", "--"]
+	// Produces: exec env VAR=val ... exitbox run --profile=gastown-polecat -- claude ...
+	ExecWrapper []string `json:"exec_wrapper,omitempty"`
+
 	// ResolvedAgent is the agent name that was resolved during config lookup.
 	// Set by ResolveRoleAgentConfig / resolveAgentConfigInternal so that
 	// BuildStartupCommand can export GT_AGENT for process detection.
@@ -741,16 +801,23 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 }
 
 // BuildCommand returns the full command line string.
-// For use with tmux SendKeys.
+// For use with tmux SendKeys and respawn-pane, where the string is
+// interpreted by the user's shell. Args containing shell-special
+// characters (e.g., brackets in "sonnet[1m]") are quoted to prevent
+// glob expansion.
 func (rc *RuntimeConfig) BuildCommand() string {
 	resolved := normalizeRuntimeConfig(rc)
 
 	cmd := resolved.Command
 	args := resolved.Args
 
-	// Combine command and args
+	// Combine command and args, quoting any that contain shell metacharacters
 	if len(args) > 0 {
-		return cmd + " " + strings.Join(args, " ")
+		quoted := make([]string, len(args))
+		for i, a := range args {
+			quoted[i] = ShellQuote(a)
+		}
+		return cmd + " " + strings.Join(quoted, " ")
 	}
 	return cmd
 }
@@ -784,6 +851,13 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 		return base + " -i " + quoteForShell(p)
 	}
 
+	// Gemini requires -i (--prompt-interactive) to auto-execute the prompt
+	// while staying in interactive mode. Positional args populate the input
+	// field but don't execute, and -p runs headless (exits after completion).
+	if resolved.Command == "gemini" {
+		return base + " -i " + quoteForShell(p)
+	}
+
 	// Quote the prompt for shell safety (positional arg for claude and others)
 	return base + " " + quoteForShell(p)
 }
@@ -799,7 +873,14 @@ func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
 	}
 
 	if p != "" && resolved.PromptMode != "none" {
-		args = append(args, p)
+		switch resolved.Command {
+		case "opencode":
+			args = append(args, "--prompt", p)
+		case "copilot", "gemini":
+			args = append(args, "-i", p)
+		default:
+			args = append(args, p)
+		}
 	}
 
 	return args
@@ -1042,11 +1123,11 @@ func defaultInstructionsFile(provider string) string {
 
 // quoteForShell quotes a string for safe shell usage.
 func quoteForShell(s string) string {
-	// Wrap in double quotes, escaping characters that are special in double-quoted strings:
-	// - backslash (escape character)
-	// - double quote (string delimiter)
-	// - backtick (command substitution)
-	// - dollar sign (variable expansion)
+	if runtime.GOOS == "windows" {
+		// PowerShell: use single quotes (no interpolation). Double embedded single quotes.
+		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	}
+	// POSIX shell: wrap in double quotes, escaping special characters.
 	escaped := strings.ReplaceAll(s, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	escaped = strings.ReplaceAll(escaped, "`", "\\`")
@@ -1056,6 +1137,9 @@ func quoteForShell(s string) string {
 
 // ThemeConfig represents tmux theme settings for a rig.
 type ThemeConfig struct {
+	// Disabled skips tmux status/window theming for this rig.
+	Disabled bool `json:"disabled,omitempty"`
+
 	// Name picks from the default palette (e.g., "ocean", "forest").
 	// If empty, a theme is auto-assigned based on rig name.
 	Name string `json:"name,omitempty"`
@@ -1064,8 +1148,13 @@ type ThemeConfig struct {
 	Custom *CustomTheme `json:"custom,omitempty"`
 
 	// RoleThemes overrides themes for specific roles in this rig.
-	// Keys: "witness", "refinery", "crew", "polecat"
+	// Keys: "witness", "refinery", "crew", "polecat".
+	// A value of "none" disables tmux theming for that role.
 	RoleThemes map[string]string `json:"role_themes,omitempty"`
+
+	// WindowTint controls window background (window-style) coloring for this rig.
+	// If nil, falls back to town-level window tint config.
+	WindowTint *WindowTint `json:"window_tint,omitempty"`
 }
 
 // CustomTheme allows specifying exact colors for the status bar.
@@ -1076,9 +1165,46 @@ type CustomTheme struct {
 
 // TownThemeConfig represents global theme settings (mayor/config.json).
 type TownThemeConfig struct {
+	// Disabled skips tmux status/window theming for all sessions unless a rig
+	// theme overrides it.
+	Disabled bool `json:"disabled,omitempty"`
+
+	// Name picks from the default palette when no role-specific override exists.
+	Name string `json:"name,omitempty"`
+
+	// Custom overrides the palette with specific colors when no role-specific
+	// override exists.
+	Custom *CustomTheme `json:"custom,omitempty"`
+
 	// RoleDefaults sets default themes for roles across all rigs.
-	// Keys: "witness", "refinery", "crew", "polecat"
+	// Keys: "mayor", "deacon", "witness", "refinery", "crew", "polecat".
+	// A value of "none" disables tmux theming for that role.
 	RoleDefaults map[string]string `json:"role_defaults,omitempty"`
+
+	// WindowTint controls window background (window-style) coloring globally.
+	// Per-rig WindowTint in ThemeConfig takes precedence over this.
+	WindowTint *WindowTint `json:"window_tint,omitempty"`
+}
+
+// WindowTint controls window background (window-style) coloring.
+// Mirrors status bar theme customization: palette name, custom colors, per-role overrides.
+// When Enabled is nil or true, window backgrounds are tinted.
+// When Enabled is false, window backgrounds use terminal defaults.
+type WindowTint struct {
+	// Enabled controls whether window tinting is active.
+	// nil or true = enabled, false = disabled (window uses terminal default).
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Name picks a palette theme for the window background.
+	// If empty, falls back to the session's status bar theme colors.
+	Name string `json:"name,omitempty"`
+
+	// Custom overrides the palette with specific window background colors.
+	Custom *CustomTheme `json:"custom,omitempty"`
+
+	// RoleTints overrides window tint themes for specific roles.
+	// Keys: "witness", "refinery", "crew", "polecat"
+	RoleTints map[string]string `json:"role_tints,omitempty"`
 }
 
 // BuiltinRoleThemes returns the default themes for each role.
@@ -1119,6 +1245,15 @@ type MergeQueueConfig struct {
 	// Nil defaults to false (manual landing required).
 	IntegrationBranchAutoLand *bool `json:"integration_branch_auto_land,omitempty"`
 
+	// MergeStrategy controls how the refinery lands approved work: "direct" (default)
+	// merges directly to the base branch, "pr" creates a GitHub pull request.
+	MergeStrategy string `json:"merge_strategy,omitempty"`
+
+	// RequireReview controls whether the refinery requires at least one approving
+	// GitHub review before merging a PR. Only meaningful when merge_strategy="pr".
+	// Nil defaults to false (no review required).
+	RequireReview *bool `json:"require_review,omitempty"`
+
 	// OnConflict specifies conflict resolution strategy: "assign_back" or "auto_rebase".
 	OnConflict string `json:"on_conflict"`
 
@@ -1157,6 +1292,17 @@ type MergeQueueConfig struct {
 	// StaleClaimTimeout is how long a claimed MR can go without updates before
 	// being considered abandoned and eligible for re-claim (e.g., "30m").
 	StaleClaimTimeout string `json:"stale_claim_timeout,omitempty"`
+
+	// JudgmentEnabled controls whether the refinery performs quality review
+	// before merging. When true, the refinery patrol's quality-review step
+	// evaluates the diff for correctness, security, and code quality.
+	// Nil defaults to false (no quality review).
+	JudgmentEnabled *bool `json:"judgment_enabled,omitempty"`
+
+	// ReviewDepth controls the thoroughness of quality review when judgment
+	// is enabled. Valid values: "quick", "standard", "deep".
+	// Nil defaults to "standard".
+	ReviewDepth string `json:"review_depth,omitempty"`
 }
 
 // OnConflict strategy constants.
@@ -1211,6 +1357,33 @@ func (c *MergeQueueConfig) IsDeleteMergedBranchesEnabled() bool {
 	return *c.DeleteMergedBranches
 }
 
+// IsJudgmentEnabled returns whether quality review is enabled for merges.
+// Nil-safe, defaults to false.
+func (c *MergeQueueConfig) IsJudgmentEnabled() bool {
+	if c.JudgmentEnabled == nil {
+		return false
+	}
+	return *c.JudgmentEnabled
+}
+
+// IsRequireReviewEnabled returns whether PR reviews are required before merging.
+// Nil-safe, defaults to false.
+func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
+	if c.RequireReview == nil {
+		return false
+	}
+	return *c.RequireReview
+}
+
+// GetReviewDepth returns the configured review depth.
+// Nil-safe, defaults to "standard".
+func (c *MergeQueueConfig) GetReviewDepth() string {
+	if c.ReviewDepth == "" {
+		return "standard"
+	}
+	return c.ReviewDepth
+}
+
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b
@@ -1224,7 +1397,7 @@ func DefaultMergeQueueConfig() *MergeQueueConfig {
 		IntegrationBranchRefineryEnabled: boolPtr(true),
 		OnConflict:                       OnConflictAssignBack,
 		RunTests:                         boolPtr(true),
-		TestCommand:                      "go test ./...",
+		TestCommand:                      "",
 		DeleteMergedBranches:             boolPtr(true),
 		RetryFlakyTests:                  1,
 		PollInterval:                     "30s",
@@ -1288,6 +1461,17 @@ func DefaultAccountsConfigDir() (string, error) {
 type QuotaState struct {
 	Version  int                          `json:"version"`  // schema version
 	Accounts map[string]AccountQuotaState `json:"accounts"` // handle -> quota state
+
+	// ActiveSwaps tracks keychain swap mappings from quota rotation.
+	// Key: target config dir (where the swapped token was written)
+	// Value: source account handle (whose token was swapped in)
+	//
+	// When a session is rotated, its config dir's keychain entry gets
+	// overwritten with the source account's token. If the source account
+	// later re-authenticates, the fresh token goes to the source's own
+	// keychain entry — not the target's. SyncSwappedTokens uses this map
+	// to propagate fresh tokens to all target keychain entries.
+	ActiveSwaps map[string]string `json:"active_swaps,omitempty"` // targetConfigDir -> sourceAccountHandle
 }
 
 // AccountQuotaStatus is the rate-limit status of an account.
@@ -1414,6 +1598,12 @@ type EscalationContacts struct {
 	HumanEmail   string `json:"human_email,omitempty"`   // email address for email:human action
 	HumanSMS     string `json:"human_sms,omitempty"`     // phone number for sms:human action
 	SlackWebhook string `json:"slack_webhook,omitempty"` // webhook URL for slack action
+	SMTPHost     string `json:"smtp_host,omitempty"`     // SMTP server host (e.g. "smtp.gmail.com")
+	SMTPPort     string `json:"smtp_port,omitempty"`     // SMTP server port (default "587")
+	SMTPFrom     string `json:"smtp_from,omitempty"`     // sender address for email notifications
+	SMTPUser     string `json:"smtp_user,omitempty"`     // SMTP auth username (optional)
+	SMTPPass     string `json:"smtp_pass,omitempty"`     // SMTP auth password (optional)
+	SMSWebhook   string `json:"sms_webhook,omitempty"`   // webhook URL for SMS delivery (e.g. Twilio)
 }
 
 // CurrentEscalationVersion is the current schema version for EscalationConfig.

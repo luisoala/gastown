@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -65,9 +66,11 @@ type TownStatus struct {
 	Name     string         `json:"name"`
 	Location string         `json:"location"`
 	Overseer *OverseerInfo  `json:"overseer,omitempty"` // Human operator
+	DND      *DNDInfo       `json:"dnd,omitempty"`      // Current agent DND status
 	Daemon   *ServiceInfo   `json:"daemon,omitempty"`   // Daemon status
 	Dolt     *DoltInfo      `json:"dolt,omitempty"`     // Dolt server status
 	Tmux     *TmuxInfo      `json:"tmux,omitempty"`     // Tmux server status
+	ACP      *ServiceInfo   `json:"acp,omitempty"`      // ACP mayor status
 	Agents   []AgentRuntime `json:"agents"`             // Global agents (Mayor, Deacon)
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
@@ -86,8 +89,8 @@ type DoltInfo struct {
 	Port          int    `json:"port"`
 	Remote        bool   `json:"remote,omitempty"`
 	DataDir       string `json:"data_dir,omitempty"`
-	PortConflict  bool   `json:"port_conflict,omitempty"`   // Port taken by another town's Dolt
-	ConflictOwner string `json:"conflict_owner,omitempty"`  // --data-dir of the process holding the port
+	PortConflict  bool   `json:"port_conflict,omitempty"`  // Port taken by another town's Dolt
+	ConflictOwner string `json:"conflict_owner,omitempty"` // --data-dir of the process holding the port
 }
 
 // TmuxInfo represents the tmux server status.
@@ -108,6 +111,13 @@ type OverseerInfo struct {
 	UnreadMail int    `json:"unread_mail"`
 }
 
+// DNDInfo represents Do Not Disturb status for the current agent context.
+type DNDInfo struct {
+	Enabled bool   `json:"enabled"`
+	Level   string `json:"level"`
+	Agent   string `json:"agent,omitempty"`
+}
+
 // AgentRuntime represents the runtime state of an agent.
 type AgentRuntime struct {
 	Name         string `json:"name"`                    // Display name (e.g., "mayor", "witness")
@@ -115,14 +125,16 @@ type AgentRuntime struct {
 	Session      string `json:"session"`                 // tmux session name
 	Role         string `json:"role"`                    // Role type
 	Running      bool   `json:"running"`                 // Is tmux session running?
+	ACP          bool   `json:"acp"`                     // Is ACP session active?
 	HasWork      bool   `json:"has_work"`                // Has pinned work?
 	WorkTitle    string `json:"work_title,omitempty"`    // Title of pinned work
 	HookBead     string `json:"hook_bead,omitempty"`     // Pinned bead ID from agent bead
-	State        string `json:"state,omitempty"`         // Agent state from agent bead
-	UnreadMail   int    `json:"unread_mail"`             // Number of unread messages
-	FirstSubject string `json:"first_subject,omitempty"` // Subject of first unread message
-	AgentAlias   string `json:"agent_alias,omitempty"`   // Configured agent name (e.g., "opus-46", "pi")
-	AgentInfo    string `json:"agent_info,omitempty"`    // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
+	State             string `json:"state,omitempty"`              // Agent state from agent bead
+	NotificationLevel string `json:"notification_level,omitempty"` // Notification level (verbose, normal, muted)
+	UnreadMail        int    `json:"unread_mail"`                  // Number of unread messages
+	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
+	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "opus-46", "pi")
+	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
 }
 
 // RigStatus represents status of a single rig.
@@ -170,7 +182,7 @@ type StatusSum struct {
 // resolveAgentDisplay inspects the actual running process in the tmux session
 // to determine what runtime and model are being used. Falls back to config
 // when the session isn't running.
-func resolveAgentDisplay(townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
+func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
 	// Map legacy role names to config role names
 	configRole := role
 	switch role {
@@ -185,6 +197,13 @@ func resolveAgentDisplay(townSettings *config.TownSettings, role string, session
 		alias = townSettings.RoleAgents[configRole]
 		if alias == "" {
 			alias = townSettings.DefaultAgent
+		}
+	}
+
+	// If mayor is in ACP mode, use the ACP agent name instead
+	if configRole == constants.RoleMayor && mayor.IsACPActive(townRoot) {
+		if acpAgent, err := mayor.GetACPAgent(townRoot); err == nil && acpAgent != "" {
+			alias = acpAgent
 		}
 	}
 
@@ -767,6 +786,7 @@ func gatherStatus() (TownStatus, error) {
 		Name:     townConfig.Name,
 		Location: townRoot,
 		Overseer: overseerInfo,
+		DND:      detectCurrentDNDStatus(townRoot),
 		Rigs:     make([]RigStatus, len(rigs)),
 	}
 
@@ -825,13 +845,19 @@ func gatherStatus() (TownStatus, error) {
 	}
 	status.Tmux = tmuxInfo
 
+	// ACP status
+	if mayor.IsACPActive(townRoot) {
+		acpPid, _ := mayor.GetACPPid(townRoot)
+		status.ACP = &ServiceInfo{Running: true, PID: acpPid}
+	}
+
 	var wg sync.WaitGroup
 
 	// Fetch global agents in parallel with rig discovery
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		status.Agents = discoverGlobalAgents(allSessions, allAgentBeads, allHookBeads, mailRouter, statusFast)
+		status.Agents = discoverGlobalAgents(townRoot, allSessions, allAgentBeads, allHookBeads, mailRouter, statusFast)
 	}()
 
 	// Process all rigs in parallel
@@ -891,14 +917,14 @@ func gatherStatus() (TownStatus, error) {
 	// Enrich agents with runtime info — inspect actual running processes
 	for i := range status.Agents {
 		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
+		alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
 		a.AgentAlias = alias
 		a.AgentInfo = info
 	}
 	for i := range status.Rigs {
 		for j := range status.Rigs[i].Agents {
 			a := &status.Rigs[i].Agents[j]
-			alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
+			alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
 			a.AgentAlias = alias
 			a.AgentInfo = info
 		}
@@ -932,6 +958,9 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Town:"), status.Name)
 	fmt.Fprintf(w, "%s\n\n", style.Dim.Render(status.Location))
 
+	// E-stop banner (if active)
+	addEstopToStatus(status.Location)
+
 	// Overseer info
 	if status.Overseer != nil {
 		overseerDisplay := status.Overseer.Name
@@ -945,6 +974,23 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 			fmt.Fprintf(w, "   📬 %d unread\n", status.Overseer.UnreadMail)
 		}
 		fmt.Fprintln(w)
+	}
+
+	// Current agent notification mode (DND)
+	if status.DND != nil {
+		icon := "🔔"
+		state := "off"
+		desc := "notifications normal"
+		if status.DND.Enabled {
+			icon = "🔕"
+			state = "on"
+			desc = "notifications muted"
+		}
+		fmt.Fprintf(w, "%s %s %s", icon, style.Bold.Render("DND:"), style.Bold.Render(state))
+		if status.DND.Agent != "" {
+			fmt.Fprintf(w, " %s", style.Dim.Render("("+status.DND.Agent+")"))
+		}
+		fmt.Fprintf(w, "\n   %s\n\n", style.Dim.Render(desc))
 	}
 
 	// Infrastructure services
@@ -978,6 +1024,13 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 				parts = append(parts, fmt.Sprintf("tmux %s", style.Dim.Render(fmt.Sprintf("(-L %s, PID %d, %d sessions, %s)", status.Tmux.Socket, status.Tmux.PID, status.Tmux.SessionCount, status.Tmux.SocketPath))))
 			} else {
 				parts = append(parts, fmt.Sprintf("tmux %s", style.Dim.Render(fmt.Sprintf("(-L %s, no server)", status.Tmux.Socket))))
+			}
+		}
+		if status.ACP != nil {
+			if status.ACP.Running {
+				parts = append(parts, fmt.Sprintf("acp %s", style.Dim.Render(fmt.Sprintf("(PID %d)", status.ACP.PID))))
+			} else {
+				parts = append(parts, fmt.Sprintf("acp %s", style.Dim.Render("(stopped)")))
 			}
 		}
 		fmt.Fprintf(w, "%s\n", strings.Join(parts, "  "))
@@ -1157,8 +1210,8 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	case "muted", "paused", "degraded":
 		// Other intentional non-observable states
 		stateInfo = style.Dim.Render(fmt.Sprintf(" [%s]", beadState))
-	// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
-	// These should be derived from tmux, not bead.
+		// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
+		// These should be derived from tmux, not bead.
 	}
 
 	// Build agent bead ID using canonical naming: prefix-rig-role-name
@@ -1222,7 +1275,12 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 
 	fmt.Fprintf(w, "%s  hook: %s\n", indent, hookStr)
 
-	// Line 3: Mail (if any unread)
+	// Line 4: Notification mode (DND)
+	if agent.NotificationLevel == beads.NotifyMuted {
+		fmt.Fprintf(w, "%s  notify: 🔕 muted (DND)\n", indent)
+	}
+
+	// Line 5: Mail (if any unread)
 	if agent.UnreadMail > 0 {
 		mailStr := fmt.Sprintf("📬 %d unread", agent.UnreadMail)
 		if agent.FirstSubject != "" {
@@ -1381,12 +1439,17 @@ func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []
 func buildStatusIndicator(agent AgentRuntime) string {
 	sessionExists := agent.Running
 
-	// Base indicator from tmux state
+	// Base indicator from tmux state or ACP state
 	var indicator string
 	if sessionExists {
 		indicator = style.Success.Render("●")
 	} else {
 		indicator = style.Error.Render("○")
+	}
+
+	// Add mode info if ACP
+	if agent.ACP {
+		indicator += style.Dim.Render(" acp")
 	}
 
 	// Add non-observable state suffix if present
@@ -1398,7 +1461,11 @@ func buildStatusIndicator(agent AgentRuntime) string {
 		indicator += style.Dim.Render(" gate")
 	case "muted", "paused", "degraded":
 		indicator += style.Dim.Render(" " + beadState)
-	// Ignore observable states: running, idle, dead, done, stopped, ""
+		// Ignore observable states: running, idle, dead, done, stopped, ""
+	}
+
+	if agent.NotificationLevel == beads.NotifyMuted {
+		indicator += style.Dim.Render(" 🔕")
 	}
 
 	return indicator
@@ -1475,7 +1542,7 @@ func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
 // allSessions is a preloaded map of tmux sessions for O(1) lookup.
 // allAgentBeads is a preloaded map of agent beads for O(1) lookup.
 // allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
+func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
 	// Get session names dynamically
 	mayorSession := getMayorSessionName()
 	deaconSession := getDeaconSessionName()
@@ -1517,12 +1584,20 @@ func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
 
+			// Check for ACP session (for Mayor)
+			if d.name == "mayor" {
+				if mayor.IsACPActive(townRoot) {
+					agent.ACP = true
+					agent.Running = true
+				}
+			}
+
 			// Look up agent bead from preloaded map (O(1))
 			if issue, ok := allAgentBeads[d.beadID]; ok {
 				// Prefer database columns over description parsing
 				// HookBead column is authoritative (cleared by unsling)
 				agent.HookBead = issue.HookBead
-				agent.State = issue.AgentState
+				agent.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
 				if agent.HookBead != "" {
 					agent.HasWork = true
 					// Get hook title from preloaded map
@@ -1530,12 +1605,9 @@ func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]
 						agent.WorkTitle = pinnedIssue.Title
 					}
 				}
-				// Fallback to description for legacy beads without database columns
-				if agent.State == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						agent.State = fields.AgentState
-					}
+				// Parse description fields for notification level
+				if fields := beads.ParseAgentFields(issue.Description); fields != nil {
+					agent.NotificationLevel = fields.NotificationLevel
 				}
 			}
 
@@ -1567,6 +1639,44 @@ func populateMailInfo(agent *AgentRuntime, router *mail.Router) {
 		if messages, err := mailbox.ListUnread(); err == nil && len(messages) > 0 {
 			agent.FirstSubject = messages[0].Subject
 		}
+	}
+}
+
+// detectCurrentDNDStatus returns DND status for the currently resolved role context.
+// Returns nil when role context cannot be determined (e.g. outside agent context).
+func detectCurrentDNDStatus(townRoot string) *DNDInfo {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	if err != nil {
+		return nil
+	}
+
+	ctx := RoleContext{
+		Role:     roleInfo.Role,
+		Rig:      roleInfo.Rig,
+		Polecat:  roleInfo.Polecat,
+		TownRoot: townRoot,
+		WorkDir:  cwd,
+	}
+	agentBeadID := getAgentBeadID(ctx)
+	if agentBeadID == "" {
+		return nil
+	}
+
+	bd := beads.New(townRoot)
+	level, err := bd.GetAgentNotificationLevel(agentBeadID)
+	if err != nil || level == "" {
+		level = beads.NotifyNormal
+	}
+
+	return &DNDInfo{
+		Enabled: level == beads.NotifyMuted,
+		Level:   level,
+		Agent:   agentBeadID,
 	}
 }
 
@@ -1662,7 +1772,7 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 				// Prefer database columns over description parsing
 				// HookBead column is authoritative (cleared by unsling)
 				agent.HookBead = issue.HookBead
-				agent.State = issue.AgentState
+				agent.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
 				if agent.HookBead != "" {
 					agent.HasWork = true
 					// Get hook title from preloaded map
@@ -1670,12 +1780,9 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 						agent.WorkTitle = pinnedIssue.Title
 					}
 				}
-				// Fallback to description for legacy beads without database columns
-				if agent.State == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						agent.State = fields.AgentState
-					}
+				// Parse description fields for notification level
+				if fields := beads.ParseAgentFields(issue.Description); fields != nil {
+					agent.NotificationLevel = fields.NotificationLevel
 				}
 			}
 
@@ -1693,6 +1800,7 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 }
 
 // getMQSummary queries beads for merge-request issues and returns a summary.
+
 // Returns nil if the rig has no refinery or no MQ issues.
 func getMQSummary(r *rig.Rig) *MQSummary {
 	if !r.HasRefinery {

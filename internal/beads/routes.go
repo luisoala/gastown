@@ -193,6 +193,33 @@ func GetPrefixForRig(townRoot, rigName string) string {
 	return config.GetRigPrefix(townRoot, rigName)
 }
 
+// CheckPrefixAvailable verifies that a prefix is not already used by a different rig.
+// The prefix should include the trailing hyphen (e.g., "gt-").
+// newPath is the path of the rig being added (e.g., "gastown" or "gastown/mayor/rig").
+// Returns nil if the prefix is available or already maps to the same rig.
+func CheckPrefixAvailable(townRoot string, prefix string, newPath string) error {
+	beadsDir := filepath.Join(townRoot, ".beads")
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		return fmt.Errorf("loading routes: %w", err)
+	}
+
+	// Extract the rig name (first path component) for comparison,
+	// since the same rig can have different path variants (e.g., "gastown" vs "gastown/mayor/rig").
+	newRig := strings.SplitN(newPath, "/", 2)[0]
+
+	for _, r := range routes {
+		if r.Prefix == prefix {
+			existingRig := strings.SplitN(r.Path, "/", 2)[0]
+			if existingRig != newRig {
+				return fmt.Errorf("prefix %q is already used by %s (path: %s); use --prefix to specify a different prefix", prefix, existingRig, r.Path)
+			}
+		}
+	}
+
+	return nil
+}
+
 // FindConflictingPrefixes checks for duplicate prefixes in routes.
 // Returns a map of prefix -> list of paths that use it.
 func FindConflictingPrefixes(beadsDir string) (map[string][]string, error) {
@@ -281,6 +308,38 @@ func GetRigNameForPrefix(townRoot, prefix string) string {
 	}
 
 	return ""
+}
+
+// ResolveBeadsDirForID resolves the correct .beads directory for a given bead ID
+// based on prefix routing. currentBeadsDir is the caller's default beads directory
+// (typically the town-level .beads). If the bead ID's prefix maps to a different
+// rig via routes.jsonl, the resolved rig's beads directory is returned.
+// Returns currentBeadsDir if no routing is needed or prefix can't be resolved.
+func ResolveBeadsDirForID(currentBeadsDir, beadID string) string {
+	prefix := ExtractPrefix(beadID)
+	if prefix == "" {
+		return currentBeadsDir
+	}
+
+	routes, err := LoadRoutes(currentBeadsDir)
+	if err != nil || routes == nil {
+		return currentBeadsDir
+	}
+
+	for _, r := range routes {
+		if r.Prefix == prefix {
+			if r.Path == "." {
+				return currentBeadsDir // Town-level — already correct
+			}
+			// Rig-level bead — resolve to rig's beads directory.
+			// Derive town root from currentBeadsDir (parent of .beads).
+			townRoot := filepath.Dir(currentBeadsDir)
+			rigDir := filepath.Join(townRoot, r.Path)
+			return ResolveBeadsDir(rigDir)
+		}
+	}
+
+	return currentBeadsDir
 }
 
 // ResolveHookDir determines the directory for running bd update on a bead.

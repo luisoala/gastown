@@ -218,6 +218,87 @@ func TestResolveHookDir(t *testing.T) {
 	}
 }
 
+func TestResolveBeadsDirForID(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create rig beads directory for gt- prefix
+	rigBeadsDir := filepath.Join(tmpDir, "gastown/mayor/rig/.beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	routesContent := `{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		beadID   string
+		expected string
+	}{
+		{
+			name:     "town-level bead returns currentBeadsDir",
+			beadID:   "hq-test123",
+			expected: beadsDir,
+		},
+		{
+			name:     "rig-prefixed bead resolves to rig beadsDir",
+			beadID:   "gt-abc",
+			expected: rigBeadsDir,
+		},
+		{
+			name:     "unknown prefix returns currentBeadsDir",
+			beadID:   "xx-unknown",
+			expected: beadsDir,
+		},
+		{
+			name:     "empty bead ID returns currentBeadsDir",
+			beadID:   "",
+			expected: beadsDir,
+		},
+		{
+			name:     "no hyphen returns currentBeadsDir",
+			beadID:   "nohyphen",
+			expected: beadsDir,
+		},
+		{
+			name:     "wisp bead (hq-wisp-xxx) resolves to town beads",
+			beadID:   "hq-wisp-abc123",
+			expected: beadsDir,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ResolveBeadsDirForID(beadsDir, tc.beadID)
+			if result != tc.expected {
+				t.Errorf("ResolveBeadsDirForID(%q, %q) = %q, want %q",
+					beadsDir, tc.beadID, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestResolveBeadsDirForID_NoRoutes(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No routes.jsonl — should always return currentBeadsDir
+	result := ResolveBeadsDirForID(beadsDir, "gt-abc")
+	if result != beadsDir {
+		t.Errorf("expected %q, got %q", beadsDir, result)
+	}
+}
+
 func TestGetRigNameForPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -251,6 +332,85 @@ func TestGetRigNameForPrefix(t *testing.T) {
 				t.Errorf("GetRigNameForPrefix(%q, %q) = %q, want %q", tmpDir, tc.prefix, result, tc.expected)
 			}
 		})
+	}
+}
+
+func TestCheckPrefixAvailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	routesContent := `{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "bd-", "path": "beads/mayor/rig"}
+{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		prefix  string
+		newPath string
+		wantErr bool
+	}{
+		{
+			name:    "new prefix is available",
+			prefix:  "cr-",
+			newPath: "crucible",
+			wantErr: false,
+		},
+		{
+			name:    "same rig re-registering same prefix",
+			prefix:  "gt-",
+			newPath: "gastown",
+			wantErr: false,
+		},
+		{
+			name:    "same rig different path variant",
+			prefix:  "gt-",
+			newPath: "gastown/mayor/rig",
+			wantErr: false,
+		},
+		{
+			name:    "collision with different rig",
+			prefix:  "gt-",
+			newPath: "getresearch",
+			wantErr: true,
+		},
+		{
+			name:    "collision with beads prefix",
+			prefix:  "bd-",
+			newPath: "boardgame",
+			wantErr: true,
+		},
+		{
+			name:    "town-level prefix not blocked",
+			prefix:  "hq-",
+			newPath: "headquarters",
+			wantErr: true, // "." rig name conflicts with "headquarters"
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckPrefixAvailable(tmpDir, tc.prefix, tc.newPath)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("CheckPrefixAvailable(%q, %q) error = %v, wantErr %v",
+					tc.prefix, tc.newPath, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckPrefixAvailable_NoRoutes(t *testing.T) {
+	tmpDir := t.TempDir()
+	// No .beads directory — all prefixes should be available
+	err := CheckPrefixAvailable(tmpDir, "gt-", "gastown")
+	if err != nil {
+		t.Errorf("expected no error with no routes file, got: %v", err)
 	}
 }
 

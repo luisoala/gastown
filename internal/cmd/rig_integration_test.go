@@ -59,7 +59,9 @@ var agentAllowlist = map[string][]string{
 
 	// Polecats are ephemeral worktrees for autonomous agents.
 	"polecat": {
+		"?? .claude/",   // bd init: creates .claude/commands/ with handoff/review slash commands
 		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns
+		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context
 	},
 }
 
@@ -495,6 +497,59 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 		if _, err := os.Stat(w.path); err == nil {
 			t.Errorf("%s should NOT exist (would pollute source repo)", w.desc)
 		}
+	}
+}
+
+// TestRigAddRespectsDefaultAgent verifies that gt rig add scaffolds the polecat
+// config directory matching the town's default_agent setting (gt-vdx).
+func TestRigAddRespectsDefaultAgent(t *testing.T) {
+	requireDoltServer(t)
+	_ = mockBdCommand(t)
+	townRoot := setupTestTown(t)
+	bridgeDoltPidToTown(t, townRoot)
+	gitURL := createTestGitRepo(t, "agenttest")
+
+	// Write a town settings file with default_agent=opencode.
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "opencode"
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("save town settings: %v", err)
+	}
+
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	if err != nil {
+		t.Fatalf("load rigs.json: %v", err)
+	}
+
+	g := git.NewGit(townRoot)
+	mgr := rig.NewManager(townRoot, rigsConfig, g)
+
+	_, err = mgr.AddRig(rig.AddRigOptions{
+		Name:        "agentrig",
+		GitURL:      gitURL,
+		BeadsPrefix: "ar",
+	})
+	if err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	rigPath := filepath.Join(townRoot, "agentrig")
+
+	// With default_agent=opencode, polecats/ should use .opencode/, not .claude/.
+	opencodePath := filepath.Join(rigPath, "polecats", ".opencode")
+	if _, err := os.Stat(opencodePath); os.IsNotExist(err) {
+		t.Errorf("polecats/.opencode/ should exist when default_agent=opencode")
+	}
+
+	// .claude/ must NOT be created when default_agent=opencode.
+	claudePath := filepath.Join(rigPath, "polecats", ".claude")
+	if _, err := os.Stat(claudePath); err == nil {
+		t.Errorf("polecats/.claude/ should NOT exist when default_agent=opencode")
 	}
 }
 
@@ -1063,7 +1118,7 @@ func TestAgentBeadIDs(t *testing.T) {
 // Known issues this test catches:
 // - Extra files in .beads/ beyond redirect (e.g., PRIME.md, databases)
 // - AGENTS.md being copied/created in worktrees
-// - CLAUDE.md being created in worktrees
+// - CLAUDE.md being created in non-polecat worktrees (polecats need it for gt done)
 // - Any other Gas Town artifacts polluting the repo
 //
 // Tests two scenarios:
@@ -1329,6 +1384,7 @@ func checkWorktreeClean(t *testing.T, agent agentWorktree, hasTrackedBeads bool)
 		allowlist["?? .beads/interactions.jsonl"] = true   // Interactions log
 		allowlist["?? .beads/issues.jsonl"] = true         // Issues log
 		allowlist["?? .beads/metadata.json"] = true        // Beads metadata
+		allowlist["M .beads/metadata.json"] = true         // Tracked metadata is rewritten to the active Dolt server in tracked-beads mode
 		allowlist["?? .beads/.gt-types-configured"] = true // Custom types sentinel
 		allowlist["?? .beads/.locks/"] = true              // Beads lock files directory
 		allowlist["?? .beads/dolt-access.lock"] = true     // Dolt access lock
